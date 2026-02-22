@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Tab Recorder — Offscreen</title>
+  </head>
+  <body>
+    <!--
+      This document is intentionally invisible. It exists solely to host
+      the media pipeline (getUserMedia, AudioContext, MediaRecorder) which
+      are unavailable in MV3 service workers.
+    -->
+    <script type="module" src="offscreen.js"></script>
+  </body>
+</html>

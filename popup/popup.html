@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Tab Recorder</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body data-state="IDLE">
+    <!-- ── Header ─────────────────────────────────────────────── -->
+    <header>
+      <span class="app-title">Tab Recorder</span>
+      <span id="tab-title" class="tab-title" title=""></span>
+    </header>
+
+    <!-- ── Warning banners (hidden by default) ────────────────── -->
+    <div id="mic-warning" class="banner banner-warn" hidden>
+      Mic unavailable — recording tab audio only
+    </div>
+    <div id="codec-warning" class="banner banner-warn" hidden>
+      Note: VP9+Opus not supported, using WebM fallback
+    </div>
+
+    <!-- ── IDLE state ─────────────────────────────────────────── -->
+    <section class="state-section section-idle">
+      <div class="status-row">
+        <span class="dot dot-idle">○</span>
+        <span class="status-label">Ready to record</span>
+      </div>
+      <button id="btn-start" class="btn btn-primary">Start Recording</button>
+    </section>
+
+    <!-- ── CONFIRMING_MIC state ───────────────────────────────── -->
+    <section class="state-section section-confirming-mic">
+      <p class="confirm-text">
+        This tab may be using the microphone.<br />
+        Include it in the recording?
+      </p>
+      <div class="btn-row">
+        <button id="btn-mic-yes" class="btn btn-primary">Yes</button>
+        <button id="btn-mic-no"  class="btn btn-secondary">No</button>
+      </div>
+    </section>
+
+    <!-- ── RECORDING state ────────────────────────────────────── -->
+    <section class="state-section section-recording">
+      <div class="status-row">
+        <span class="dot dot-recording" aria-label="Recording">●</span>
+        <span class="status-label">Recording</span>
+        <span id="timer" class="timer">00:00:00</span>
+      </div>
+      <div class="size-row">
+        Size: <span id="size-display">0 B</span>
+      </div>
+      <div class="btn-row">
+        <button id="btn-monitor" class="btn btn-secondary btn-monitor-on">Tab audio: On</button>
+        <button id="btn-stop"    class="btn btn-danger">Stop &amp; Save</button>
+      </div>
+    </section>
+
+    <!-- ── LIMIT_PAUSED state ─────────────────────────────────── -->
+    <section class="state-section section-limit-paused">
+      <div class="status-row">
+        <span class="dot dot-warning">⚠</span>
+        <span class="status-label">Recording limit reached. Paused.</span>
+      </div>
+      <div class="btn-row">
+        <button id="btn-continue"    class="btn btn-primary">Continue</button>
+        <button id="btn-stop-limit"  class="btn btn-danger">Stop &amp; Save</button>
+      </div>
+    </section>
+
+    <!-- ── SAVING state ───────────────────────────────────────── -->
+    <section class="state-section section-saving">
+      <div class="status-row">
+        <span class="spinner" aria-hidden="true"></span>
+        <span class="status-label">Saving…</span>
+      </div>
+    </section>
+
+    <!-- ── ERROR state (tab closed / generic) ─────────────────── -->
+    <section class="state-section section-error">
+      <p id="error-text" class="error-text">An error occurred.</p>
+      <div class="btn-row">
+        <button id="btn-save-partial" class="btn btn-primary">Save partial</button>
+        <button id="btn-discard"      class="btn btn-secondary">Discard</button>
+      </div>
+    </section>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
