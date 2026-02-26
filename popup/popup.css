@@ -163,6 +163,42 @@ body[data-state="ERROR"]          .section-error          { display: block; }
   flex-wrap: wrap;
 }
 
+.settings-row {
+  margin-bottom: 8px;
+}
+
+.perm-status {
+  margin-bottom: 8px;
+  padding: 5px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  border: 1px solid transparent;
+}
+
+.perm-granted {
+  background: #0f2f1d;
+  color: #93e6b6;
+  border-color: #1f6d41;
+}
+
+.perm-prompt {
+  background: #3a2e00;
+  color: #e0c060;
+  border-color: #5a4a00;
+}
+
+.perm-denied {
+  background: #3a1111;
+  color: #f5a3a3;
+  border-color: #702222;
+}
+
+.perm-unknown {
+  background: #1f2238;
+  color: #b6b9d6;
+  border-color: #3c4168;
+}
+
 /* Full-width button when alone */
 .state-section > .btn {
   width: 100%;
@@ -206,6 +242,12 @@ body[data-state="ERROR"]          .section-error          { display: block; }
 .btn-monitor-on:hover  { background: #265a34; }
 .btn-monitor-off:hover { background: #4a4a6a; }
 
+/* ── Generic toggle button states ─────────────────────────────────────────── */
+.btn-toggle-on  { background: #1e4a2a; color: #80e0a0; }
+.btn-toggle-off { background: #3a3a5a; color: #9090b0; }
+.btn-toggle-on:hover  { background: #265a34; }
+.btn-toggle-off:hover { background: #4a4a6a; }
+
 /* ── Warning banners ──────────────────────────────────────────────────────── */
 .banner {
   font-size: 11px;
@@ -218,4 +260,46 @@ body[data-state="ERROR"]          .section-error          { display: block; }
   background: #3a2e00;
   color: #e0c060;
   border: 1px solid #5a4a00;
+}
+
+/* ── Diagnostics ───────────────────────────────────────────────────────────── */
+.diag-section {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid #2e2e4e;
+}
+
+.diag-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.diag-title {
+  font-size: 11px;
+  color: #a0a0c8;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.btn-small {
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
+.diag-log {
+  margin: 0;
+  max-height: 140px;
+  overflow: auto;
+  padding: 6px;
+  border-radius: 4px;
+  background: #101024;
+  border: 1px solid #2e2e4e;
+  color: #c8d0ff;
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 10px;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  word-break: break-word;
 }

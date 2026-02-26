@@ -21,8 +21,13 @@ let fileHandle        = null;   // FileSystemFileHandle opened at Stop time
 let partialBlobKey    = null;   // stored when TAB_CLOSED arrives with a blob key
 let activeTabId       = null;
 let activeTabTitle    = '';
+let activeTabUrl      = '';
 let recordingTabTitle = '';     // title of the tab being recorded (from SW)
 let monitorOn         = true;   // whether tab audio plays to speakers
+let forceMicEnabled   = false;  // include microphone even without mic confirmation flow
+let pointerEnabled    = false;  // draw pointer overlay in recorded tab
+let forcedMicDeviceId = null;   // concrete input device selected during forced mic access check
+const MAX_DIAG_LINES  = 120;
 
 // ─── DOM references ───────────────────────────────────────────────────────────
 
@@ -32,16 +37,25 @@ const elSizeDisplay  = document.getElementById('size-display');
 const elErrorText    = document.getElementById('error-text');
 const elMicWarning   = document.getElementById('mic-warning');
 const elCodecWarning = document.getElementById('codec-warning');
+const elPointerWarn  = document.getElementById('pointer-warning');
+const elMicPermStatus = document.getElementById('mic-perm-status');
+const elDiagLog      = document.getElementById('diag-log');
 
 const btnStart       = document.getElementById('btn-start');
 const btnStop        = document.getElementById('btn-stop');
 const btnMonitor     = document.getElementById('btn-monitor');
+const btnForceMic    = document.getElementById('btn-force-mic');
+const btnForceMicRec = document.getElementById('btn-force-mic-recording');
+const btnPointerIdle = document.getElementById('btn-pointer-idle');
+const btnPointerRec  = document.getElementById('btn-pointer-recording');
+const btnGrantMic    = document.getElementById('btn-grant-mic');
 const btnContinue    = document.getElementById('btn-continue');
 const btnStopLimit   = document.getElementById('btn-stop-limit');
 const btnMicYes      = document.getElementById('btn-mic-yes');
 const btnMicNo       = document.getElementById('btn-mic-no');
 const btnSavePartial = document.getElementById('btn-save-partial');
 const btnDiscard     = document.getElementById('btn-discard');
+const btnDiagClear   = document.getElementById('btn-diag-clear');
 
 // ─── Initialisation ───────────────────────────────────────────────────────────
 
@@ -55,6 +69,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (tabs && tabs[0]) {
       activeTabId    = tabs[0].id;
       activeTabTitle = tabs[0].title || '';
+      activeTabUrl   = tabs[0].url || '';
       elTabTitle.textContent = truncate(activeTabTitle, 30);
       elTabTitle.title       = activeTabTitle;
     }
@@ -72,6 +87,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
       // Stash the recording tab title for use in filenames.
       if (response.tabTitle) recordingTabTitle = response.tabTitle;
+      if (typeof response.forceMic === 'boolean') {
+        forceMicEnabled = response.forceMic;
+      }
+      if (typeof response.showPointer === 'boolean') {
+        pointerEnabled = response.showPointer;
+      }
+      updateForceMicButton();
+      updatePointerButtons();
 
       // A blob finished while popup was closed — recover via save dialog.
       if (response.pendingBlobKey) {
@@ -87,12 +110,29 @@ document.addEventListener('DOMContentLoaded', () => {
   btnStart.addEventListener('click',       onStartClick);
   btnStop.addEventListener('click',        onStopClick);
   btnMonitor.addEventListener('click',     onMonitorClick);
+  btnForceMic.addEventListener('click',    onForceMicClick);
+  btnForceMicRec.addEventListener('click', onForceMicClick);
+  btnPointerIdle.addEventListener('click', onPointerClick);
+  btnPointerRec.addEventListener('click',  onPointerClick);
+  btnGrantMic.addEventListener('click',    onGrantMicClick);
   btnContinue.addEventListener('click',    onContinueClick);
   btnStopLimit.addEventListener('click',   onStopLimitClick);
   btnMicYes.addEventListener('click',      () => sendMsg({ type: 'MIC_ANSWER', include: true }));
   btnMicNo.addEventListener('click',       () => sendMsg({ type: 'MIC_ANSWER', include: false }));
   btnSavePartial.addEventListener('click', onSavePartialClick);
   btnDiscard.addEventListener('click',     onDiscardClick);
+  btnDiagClear.addEventListener('click',   onDiagClearClick);
+
+  updateForceMicButton();
+  updatePointerButtons();
+  refreshMicPermissionStatus();
+  addDiag('popup', 'Initialized popup');
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      refreshMicPermissionStatus();
+    }
+  });
 });
 
 // ─── beforeunload guard ───────────────────────────────────────────────────────
@@ -134,16 +174,29 @@ function handlePortMessage(message) {
 
     case 'MIC_UNAVAILABLE':
       showBannerTemporarily(elMicWarning, 4000);
+      addDiag('sw', 'MIC_UNAVAILABLE: recording continued without microphone');
       break;
 
     case 'CODEC_FALLBACK':
       elCodecWarning.hidden = false;
       break;
 
+    case 'POINTER_UNAVAILABLE':
+      pointerEnabled = false;
+      updatePointerButtons();
+      showBannerTemporarily(elPointerWarn, 4000);
+      addDiag('sw', 'Pointer overlay unavailable');
+      break;
+
+    case 'MIC_DIAGNOSTIC':
+      addDiag(message.source || 'mic', message.message || 'diagnostic', message.details);
+      break;
+
     case 'RECORDING_ERROR':
       elErrorText.textContent =
         `Recording error: ${message.error || 'Unknown error'}`;
       renderState('ERROR');
+      addDiag('sw', `RECORDING_ERROR: ${message.error || 'Unknown error'}`);
       break;
 
     default:
@@ -153,14 +206,53 @@ function handlePortMessage(message) {
 
 // ─── Button handlers ──────────────────────────────────────────────────────────
 
-function onStartClick() {
+async function onStartClick() {
   if (!activeTabId) {
     console.error('[popup] No active tab ID');
     return;
   }
+
+  if (!isCapturablePage(activeTabUrl)) {
+    addDiag('popup', 'Start blocked: current page cannot be captured', { activeTabUrl });
+    window.alert(
+      'This page cannot be captured. Open a regular website tab (https://...) and start recording from there.'
+    );
+    return;
+  }
+
+  if (forceMicEnabled) {
+    addDiag('popup', 'Force Mic enabled, running microphone preflight');
+    const micResult = await requestMicAccessFromDefaultDevice();
+    const micReady = micResult.ok;
+    if (!micReady) {
+      addDiag('popup', 'Microphone preflight failed; start aborted');
+      refreshMicPermissionStatus();
+      return;
+    }
+    forcedMicDeviceId = micResult.deviceId;
+    addDiag('popup', 'Microphone preflight succeeded', {
+      selectedDeviceId: forcedMicDeviceId || '(none)',
+    });
+  } else {
+    forcedMicDeviceId = null;
+    addDiag('popup', 'Force Mic disabled; microphone will be optional');
+  }
+
   // Save the recording tab title so Stop can use it for the filename.
   recordingTabTitle = activeTabTitle;
-  sendMsg({ type: 'START_RECORDING', tabId: activeTabId, tabTitle: activeTabTitle });
+  sendMsg({
+    type: 'START_RECORDING',
+    tabId: activeTabId,
+    tabTitle: activeTabTitle,
+    forceMic: forceMicEnabled,
+    showPointer: pointerEnabled,
+    micDeviceId: forcedMicDeviceId,
+  });
+  addDiag('popup', 'START_RECORDING sent', {
+    forceMicEnabled,
+    pointerEnabled,
+    micDeviceId: forcedMicDeviceId || null,
+  });
 }
 
 async function onStopClick() {
@@ -185,6 +277,37 @@ function onMonitorClick() {
   monitorOn = !monitorOn;
   updateMonitorButton();
   sendMsg({ type: 'TOGGLE_MONITOR', on: monitorOn });
+}
+
+function onForceMicClick() {
+  const appliesNextRecording =
+    currentState === 'RECORDING' || currentState === 'LIMIT_PAUSED';
+
+  forceMicEnabled = !forceMicEnabled;
+  updateForceMicButton();
+  sendMsg({ type: 'SET_FORCE_MIC_OPTION', on: forceMicEnabled });
+  if (appliesNextRecording) {
+    addDiag(
+      'popup',
+      `Force Mic toggled: ${forceMicEnabled ? 'ON' : 'OFF'} (will apply on next recording)`
+    );
+    window.alert(
+      'Force Mic applies from the next recording. Stop current recording and start a new one to capture microphone audio.'
+    );
+  } else {
+    addDiag('popup', `Force Mic toggled: ${forceMicEnabled ? 'ON' : 'OFF'}`);
+  }
+}
+
+function onPointerClick() {
+  pointerEnabled = !pointerEnabled;
+  updatePointerButtons();
+  addDiag('popup', `Pointer toggled: ${pointerEnabled ? 'ON' : 'OFF'}`);
+
+  if (currentState === 'RECORDING' || currentState === 'LIMIT_PAUSED') {
+    sendMsg({ type: 'TOGGLE_POINTER', on: pointerEnabled });
+    addDiag('popup', 'TOGGLE_POINTER sent during recording', { pointerEnabled });
+  }
 }
 
 function onContinueClick() {
@@ -398,6 +521,39 @@ function updateMonitorButton() {
   btnMonitor.classList.toggle('btn-monitor-off', !monitorOn);
 }
 
+function updateForceMicButton() {
+  const label = forceMicEnabled ? 'Force Mic: On' : 'Force Mic: Off';
+
+  if (btnForceMic) {
+    btnForceMic.textContent = label;
+    setToggleButtonState(btnForceMic, forceMicEnabled);
+  }
+
+  if (btnForceMicRec) {
+    btnForceMicRec.textContent = label;
+    setToggleButtonState(btnForceMicRec, forceMicEnabled);
+  }
+}
+
+function updatePointerButtons() {
+  const label = pointerEnabled ? 'Pointer: On' : 'Pointer: Off';
+
+  if (btnPointerIdle) {
+    btnPointerIdle.textContent = label;
+    setToggleButtonState(btnPointerIdle, pointerEnabled);
+  }
+
+  if (btnPointerRec) {
+    btnPointerRec.textContent = label;
+    setToggleButtonState(btnPointerRec, pointerEnabled);
+  }
+}
+
+function setToggleButtonState(button, enabled) {
+  button.classList.toggle('btn-toggle-on', enabled);
+  button.classList.toggle('btn-toggle-off', !enabled);
+}
+
 // ─── Helper functions ─────────────────────────────────────────────────────────
 
 /**
@@ -477,7 +633,167 @@ function showBannerTemporarily(el, ms) {
 function sendMsg(message) {
   chrome.runtime.sendMessage(message).catch((err) => {
     console.warn('[popup] sendMessage error:', err);
+    addDiag('popup', `sendMessage failed: ${err?.message || String(err)}`);
   });
+}
+
+async function requestMicAccessFromDefaultDevice() {
+  const permissionBefore = await queryMicPermissionState();
+  addDiag('popup', `Permission before getUserMedia: ${permissionBefore}`);
+
+  const inputDevicesBefore = await listInputDevices();
+  addDiag('popup', `Audio inputs visible before request: ${inputDevicesBefore.length}`, inputDevicesBefore);
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { deviceId: { ideal: 'default' } },
+      video: false,
+    });
+    const audioTrack = stream.getAudioTracks()[0] || null;
+    const deviceId = audioTrack?.getSettings?.().deviceId || null;
+    const trackInfo = audioTrack
+      ? {
+          label: audioTrack.label || '',
+          enabled: audioTrack.enabled,
+          muted: audioTrack.muted,
+          readyState: audioTrack.readyState,
+          settings: audioTrack.getSettings?.() || {},
+          constraints: audioTrack.getConstraints?.() || {},
+        }
+      : null;
+
+    addDiag('popup', 'getUserMedia(audio) succeeded', {
+      selectedDeviceId: deviceId || null,
+      track: trackInfo,
+    });
+
+    stream.getTracks().forEach((track) => track.stop());
+
+    const permissionAfter = await queryMicPermissionState();
+    addDiag('popup', `Permission after getUserMedia: ${permissionAfter}`);
+    const inputDevicesAfter = await listInputDevices();
+    addDiag('popup', `Audio inputs visible after request: ${inputDevicesAfter.length}`, inputDevicesAfter);
+
+    return {
+      ok: true,
+      deviceId,
+      trackInfo,
+      errorName: null,
+      errorMessage: null,
+    };
+  } catch (err) {
+    console.warn('[popup] Forced mic request failed:', err);
+    addDiag('popup', `getUserMedia(audio) failed: ${err?.name || 'Error'}: ${err?.message || 'unknown'}`);
+    window.alert('Microphone access was denied or unavailable. Please allow microphone access for this extension.');
+    return {
+      ok: false,
+      deviceId: null,
+      errorName: err?.name || 'Error',
+      errorMessage: err?.message || 'unknown',
+    };
+  }
+}
+
+function onDiagClearClick() {
+  if (!elDiagLog) return;
+  elDiagLog.textContent = '[diag] cleared';
+}
+
+function onGrantMicClick() {
+  addDiag('popup', 'Grant Mic clicked');
+  requestMicAccessFromDefaultDevice().then((result) => {
+    if (result.ok) {
+      addDiag('popup', 'Grant Mic succeeded');
+    }
+    refreshMicPermissionStatus();
+  });
+}
+
+function addDiag(source, message, details) {
+  if (!elDiagLog) return;
+  const ts = new Date().toISOString().slice(11, 19);
+  const parts = [`[${ts}] [${source}] ${message}`];
+  if (details !== undefined) {
+    parts.push(safeJson(details));
+  }
+  elDiagLog.textContent += `\n${parts.join(' | ')}`;
+  trimDiag();
+  elDiagLog.scrollTop = elDiagLog.scrollHeight;
+}
+
+function trimDiag() {
+  if (!elDiagLog) return;
+  const lines = elDiagLog.textContent.split('\n');
+  if (lines.length <= MAX_DIAG_LINES) return;
+  elDiagLog.textContent = lines.slice(lines.length - MAX_DIAG_LINES).join('\n');
+}
+
+function safeJson(value) {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function isCapturablePage(url) {
+  if (!url) return true;
+  return !/^(chrome|edge|about|chrome-extension):/i.test(url);
+}
+
+async function refreshMicPermissionStatus() {
+  const state = await queryMicPermissionState();
+  applyMicPermissionStatus(state);
+  addDiag('popup', `Mic permission status: ${state}`);
+}
+
+function applyMicPermissionStatus(state) {
+  if (!elMicPermStatus) return;
+
+  elMicPermStatus.classList.remove('perm-granted', 'perm-prompt', 'perm-denied', 'perm-unknown');
+
+  if (state === 'granted') {
+    elMicPermStatus.classList.add('perm-granted');
+    elMicPermStatus.textContent = 'Mic permission: Granted';
+    return;
+  }
+  if (state === 'prompt') {
+    elMicPermStatus.classList.add('perm-prompt');
+    elMicPermStatus.textContent = 'Mic permission: Not granted yet (Prompt)';
+    return;
+  }
+  if (state === 'denied') {
+    elMicPermStatus.classList.add('perm-denied');
+    elMicPermStatus.textContent = 'Mic permission: Denied';
+    return;
+  }
+
+  elMicPermStatus.classList.add('perm-unknown');
+  elMicPermStatus.textContent = `Mic permission: ${state}`;
+}
+
+async function queryMicPermissionState() {
+  try {
+    if (!navigator.permissions || !navigator.permissions.query) {
+      return 'permissions-api-unavailable';
+    }
+    const result = await navigator.permissions.query({ name: 'microphone' });
+    return result.state;
+  } catch (err) {
+    return `permissions-query-error:${err?.name || 'Error'}`;
+  }
+}
+
+async function listInputDevices() {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    return devices
+      .filter((d) => d.kind === 'audioinput')
+      .map((d) => ({ kind: d.kind, deviceId: d.deviceId, label: d.label || '' }));
+  } catch (err) {
+    addDiag('popup', `enumerateDevices failed: ${err?.name || 'Error'}: ${err?.message || 'unknown'}`);
+    return [];
+  }
 }
 
 // ─── IndexedDB helpers ────────────────────────────────────────────────────────

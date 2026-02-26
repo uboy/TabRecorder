@@ -68,6 +68,15 @@ function sendToSW(message) {
   });
 }
 
+function sendMicDiagnostic(message, details) {
+  sendToSW({
+    type: 'MIC_DIAGNOSTIC',
+    source: 'offscreen',
+    message,
+    details,
+  });
+}
+
 function generateUUID() {
   // crypto.randomUUID is available in extension contexts (Chrome 92+)
   return crypto.randomUUID();
@@ -191,8 +200,13 @@ function finalizeRecording() {
 
 // ─── START_MEDIA handler ──────────────────────────────────────────────────────
 
-async function handleStartMedia({ streamId, includeMic, suggestedName: name }) {
-  console.log('[offscreen] START_MEDIA received. streamId:', streamId, 'includeMic:', includeMic);
+async function handleStartMedia({ streamId, includeMic, forceMic, micDeviceId, suggestedName: name }) {
+  console.log('[offscreen] START_MEDIA received. streamId:', streamId, 'includeMic:', includeMic, 'forceMic:', forceMic);
+  sendMicDiagnostic('START_MEDIA received', {
+    includeMic: Boolean(includeMic),
+    forceMic: Boolean(forceMic),
+    micDeviceId: micDeviceId || null,
+  });
 
   // Clean up any previous session defensively
   resetSession();
@@ -238,15 +252,80 @@ async function handleStartMedia({ streamId, includeMic, suggestedName: name }) {
 
   // 2. Optionally acquire mic stream
   if (includeMic) {
+    const micConstraints = {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    };
+    if (typeof micDeviceId === 'string' && micDeviceId) {
+      micConstraints.deviceId = { exact: micDeviceId };
+    } else {
+      micConstraints.deviceId = { ideal: 'default' };
+    }
+    sendMicDiagnostic('Requesting microphone stream', { micConstraints });
+
     try {
-      micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio: micConstraints,
+        video: false,
+      });
       console.log('[offscreen] Mic stream acquired. tracks:', micStream.getAudioTracks().length);
+
+      const micTrack = micStream.getAudioTracks()[0] || null;
+      if (micTrack) {
+        sendMicDiagnostic('Mic stream acquired', {
+          label: micTrack.label || '',
+          enabled: micTrack.enabled,
+          muted: micTrack.muted,
+          readyState: micTrack.readyState,
+          settings: micTrack.getSettings?.() || {},
+          constraints: micTrack.getConstraints?.() || {},
+        });
+
+        micTrack.onmute = () => {
+          sendMicDiagnostic('Mic track muted', {
+            enabled: micTrack.enabled,
+            muted: micTrack.muted,
+            readyState: micTrack.readyState,
+          });
+        };
+        micTrack.onunmute = () => {
+          sendMicDiagnostic('Mic track unmuted', {
+            enabled: micTrack.enabled,
+            muted: micTrack.muted,
+            readyState: micTrack.readyState,
+          });
+        };
+        micTrack.onended = () => {
+          sendMicDiagnostic('Mic track ended', {
+            enabled: micTrack.enabled,
+            muted: micTrack.muted,
+            readyState: micTrack.readyState,
+          });
+        };
+      } else {
+        sendMicDiagnostic('Mic stream acquired but audio track missing');
+      }
     } catch (err) {
-      // Mic failure is non-fatal — continue recording with tab audio only
+      sendMicDiagnostic('Microphone getUserMedia failed', {
+        errorName: err.name || 'Error',
+        errorMessage: err.message || 'unknown',
+      });
+      if (forceMic) {
+        const errText = `Microphone is required but unavailable: ${err.name}: ${err.message}`;
+        console.error('[offscreen]', errText);
+        sendToSW({ type: 'CAPTURE_ERROR', error: errText });
+        stopAllTracks();
+        return;
+      }
+
+      // Mic failure is non-fatal when mic was optional.
       console.warn('[offscreen] Mic unavailable, falling back to tab audio:', err.name, err.message);
       sendToSW({ type: 'MIC_UNAVAILABLE' });
       micStream = null;
     }
+  } else {
+    sendMicDiagnostic('Mic capture disabled for this session');
   }
 
   // 3. Determine codec
@@ -274,12 +353,19 @@ async function handleStartMedia({ streamId, includeMic, suggestedName: name }) {
   if (micStream) {
     const audioContext = new AudioContext();
     await audioContext.resume(); // required — offscreen has no user gesture
+    sendMicDiagnostic('AudioContext resumed for mixing', { state: audioContext.state });
     mixer = new AudioMixer(audioContext);
     combinedStream = mixer.mix(tabStream, micStream);
   } else {
     combinedStream = tabStream; // direct pass-through, no AudioContext needed
+    sendMicDiagnostic('Using tabStream directly (no mic mixing)');
   }
   console.log('[offscreen] Combined stream tracks:', combinedStream.getTracks().length);
+  sendMicDiagnostic('Combined stream ready', {
+    totalTracks: combinedStream.getTracks().length,
+    audioTracks: combinedStream.getAudioTracks().length,
+    videoTracks: combinedStream.getVideoTracks().length,
+  });
 
   // 5. Build MediaRecorder
   recorder = new MediaRecorder(combinedStream, { mimeType });
@@ -300,6 +386,10 @@ async function handleStartMedia({ streamId, includeMic, suggestedName: name }) {
   // 7. Start recording with 1-second timeslice
   recorder.start(1000);
   console.log('[offscreen] MediaRecorder started. state:', recorder.state);
+  sendMicDiagnostic('MediaRecorder started', {
+    recorderState: recorder.state,
+    mimeType,
+  });
 
   // 8. Track wall-clock start time and begin broadcasting STATE_UPDATE
   startTime = Date.now();

@@ -31,10 +31,17 @@ let recordingTabTitle = '';
 // Pending mic-answer state: we need to know tabId/tabTitle when MIC_ANSWER arrives
 let pendingTabId    = null;
 let pendingTabTitle = '';
+let pendingForceMic = false;
+let pendingShowPointer = false;
+let awaitingMicPermission = false;
 
 // Blob that finished while the popup was closed — delivered on next popup open
 let pendingBlobKey       = null;
 let pendingSuggestedName = '';
+
+// Current options reflected by popup controls.
+let currentForceMicOption = false;
+let currentShowPointerOption = false;
 
 // ─── Keepalive alarm ─────────────────────────────────────────────────────────
 
@@ -84,7 +91,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // All other messages originate from popup or content script
   switch (message.type) {
     case 'START_RECORDING':
-      handleStartRecording(message.tabId, message.tabTitle);
+      handleStartRecording(message.tabId, message.tabTitle, {
+        forceMic: message.forceMic,
+        showPointer: message.showPointer,
+        micDeviceId: message.micDeviceId,
+      });
       break;
 
     case 'MIC_PERMISSION_STATE':
@@ -110,6 +121,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         tabTitle:            recordingTabTitle,
         pendingBlobKey,
         pendingSuggestedName,
+        forceMic:            currentForceMicOption,
+        showPointer:         currentShowPointerOption,
       });
       return true; // keep sendResponse channel open
 
@@ -129,6 +142,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     case 'TOGGLE_MONITOR':
       sendToOffscreen({ type: message.on ? 'MONITOR_ON' : 'MONITOR_OFF', target: 'offscreen' });
+      break;
+
+    case 'SET_FORCE_MIC_OPTION':
+      currentForceMicOption = Boolean(message.on);
+      break;
+
+    case 'TOGGLE_POINTER':
+      currentShowPointerOption = Boolean(message.on);
+      if ((state === 'RECORDING' || state === 'LIMIT_PAUSED') && recordingTabId !== null) {
+        setPointerOverlay(recordingTabId, currentShowPointerOption).then((ok) => {
+          if (!ok) {
+            currentShowPointerOption = false;
+            sendToPopup({ type: 'POINTER_UNAVAILABLE' });
+          }
+        });
+      }
       break;
 
     default:
@@ -152,35 +181,96 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
-async function handleStartRecording(tabId, tabTitle) {
+async function handleStartRecording(tabId, tabTitle, options = {}) {
   pendingTabId    = tabId;
   pendingTabTitle = tabTitle;
+  pendingForceMic = Boolean(options.forceMic);
+  pendingShowPointer = Boolean(options.showPointer);
+  const pendingMicDeviceId = typeof options.micDeviceId === 'string' ? options.micDeviceId : null;
+
+  currentForceMicOption = pendingForceMic;
+  currentShowPointerOption = pendingShowPointer;
+  awaitingMicPermission = !pendingForceMic;
+  sendMicDiagnostic('sw', 'handleStartRecording', {
+    tabId,
+    forceMic: pendingForceMic,
+    showPointer: pendingShowPointer,
+    micDeviceId: pendingMicDeviceId || null,
+  });
 
   try {
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      files: ['content/content-script.js'],
-    });
+    await ensureContentScriptInjected(tabId);
   } catch (err) {
-    // Cannot inject into chrome:// pages or other restricted origins.
-    // Send a synthetic 'denied' state so recording falls back to tab-only.
     console.warn('[SW] Could not inject content script:', err.message);
+
+    if (pendingForceMic) {
+      awaitingMicPermission = false;
+      startCapture(
+        pendingTabId,
+        pendingTabTitle,
+        true,
+        pendingShowPointer,
+        { forceMic: true, micDeviceId: pendingMicDeviceId }
+      );
+    } else {
+      // Cannot inject into chrome:// pages or other restricted origins.
+      // Send a synthetic 'denied' state so recording falls back to tab-only.
+      handleMicPermissionState('denied');
+    }
+    return;
+  }
+
+  if (pendingShowPointer) {
+    const pointerEnabled = await setPointerOverlay(tabId, true);
+    if (!pointerEnabled) {
+      currentShowPointerOption = false;
+      pendingShowPointer = false;
+      sendToPopup({ type: 'POINTER_UNAVAILABLE' });
+    }
+  }
+
+  if (pendingForceMic) {
+    awaitingMicPermission = false;
+    sendMicDiagnostic('sw', 'Force mic path selected, skipping MIC_PERMISSION_STATE confirmation');
+    startCapture(
+      pendingTabId,
+      pendingTabTitle,
+      true,
+      pendingShowPointer,
+      { forceMic: true, micDeviceId: pendingMicDeviceId }
+    );
+    return;
+  }
+
+  const micRequested = await requestMicPermissionState(tabId);
+  if (!micRequested) {
+    sendMicDiagnostic('sw', 'MIC_PERMISSION_STATE request failed, falling back to tab-only recording');
     handleMicPermissionState('denied');
   }
 }
 
 function handleMicPermissionState(permState) {
+  if (!awaitingMicPermission) {
+    return;
+  }
+  awaitingMicPermission = false;
+  sendMicDiagnostic('sw', 'MIC_PERMISSION_STATE received', { permState });
+
   if (permState === 'granted') {
     setState('CONFIRMING_MIC');
     sendToPopup({ type: 'CONFIRM_MIC' });
   } else {
     // Skip mic dialog — proceed directly to capture
-    startCapture(pendingTabId, pendingTabTitle, false);
+    startCapture(pendingTabId, pendingTabTitle, false, pendingShowPointer);
   }
 }
 
 function handleMicAnswer(include) {
-  startCapture(pendingTabId, pendingTabTitle, include);
+  sendMicDiagnostic('sw', 'MIC_ANSWER received', { include });
+  startCapture(pendingTabId, pendingTabTitle, include, pendingShowPointer, {
+    forceMic: false,
+    micDeviceId: null,
+  });
 }
 
 function handleOffscreenMessage(message) {
@@ -197,6 +287,7 @@ function handleOffscreenMessage(message) {
       break;
 
     case 'BLOB_READY':
+      disablePointerOverlay();
       setState('IDLE');
       recordingTabId    = null;
       recordingTabTitle = '';
@@ -218,11 +309,18 @@ function handleOffscreenMessage(message) {
       sendToPopup(message);
       break;
 
+    case 'MIC_DIAGNOSTIC':
+      sendToPopup(message);
+      break;
+
     case 'CAPTURE_ERROR':
     case 'RECORDER_ERROR':
     case 'BLOB_READY_ERROR':
       console.error('[SW] Offscreen error:', message.type, message.error);
+      disablePointerOverlay();
       setState('IDLE');
+      recordingTabId    = null;
+      recordingTabTitle = '';
       sendToPopup({ type: 'RECORDING_ERROR', error: message.error });
       break;
 
@@ -233,9 +331,18 @@ function handleOffscreenMessage(message) {
 
 // ─── startCapture ─────────────────────────────────────────────────────────────
 
-async function startCapture(tabId, tabTitle, includeMic) {
+async function startCapture(tabId, tabTitle, includeMic, showPointer, micOptions = {}) {
   recordingTabId    = tabId;
   recordingTabTitle = tabTitle;
+  pendingShowPointer = Boolean(showPointer);
+  currentShowPointerOption = pendingShowPointer;
+  sendMicDiagnostic('sw', 'startCapture called', {
+    tabId,
+    includeMic: Boolean(includeMic),
+    forceMic: Boolean(micOptions.forceMic),
+    micDeviceId: typeof micOptions.micDeviceId === 'string' ? micOptions.micDeviceId : null,
+    showPointer: pendingShowPointer,
+  });
 
   // Ensure the offscreen document is READY before calling getMediaStreamId.
   // Stream IDs have a short validity window — minimising the delay between
@@ -246,6 +353,7 @@ async function startCapture(tabId, tabTitle, includeMic) {
     await ensureOffscreenDocument();
   } catch (err) {
     console.error('[SW] Failed to create offscreen document:', err);
+    disablePointerOverlay();
     setState('IDLE');
     sendToPopup({ type: 'RECORDING_ERROR', error: err.message });
     return;
@@ -255,6 +363,7 @@ async function startCapture(tabId, tabTitle, includeMic) {
     if (chrome.runtime.lastError || !streamId) {
       const errMsg = chrome.runtime.lastError?.message ?? 'getMediaStreamId failed';
       console.error('[SW] tabCapture.getMediaStreamId error:', errMsg);
+      disablePointerOverlay();
       setState('IDLE');
       sendToPopup({ type: 'RECORDING_ERROR', error: errMsg });
       return;
@@ -269,6 +378,9 @@ async function startCapture(tabId, tabTitle, includeMic) {
       target: 'offscreen',
       streamId,
       includeMic,
+      forceMic: Boolean(micOptions.forceMic),
+      micDeviceId: typeof micOptions.micDeviceId === 'string' ? micOptions.micDeviceId : null,
+      showPointer: pendingShowPointer,
       suggestedName,
     });
 
@@ -291,6 +403,175 @@ async function ensureOffscreenDocument() {
       justification: 'Tab recording pipeline: getUserMedia, AudioContext, MediaRecorder',
     });
   }
+}
+
+async function ensureContentScriptInjected(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: ['content/content-script.js'],
+  });
+}
+
+function sendToTab(tabId, message) {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(tabId, message, () => {
+      const err = chrome.runtime.lastError;
+      if (err) {
+        const errMsg = err.message || '';
+        // Not a delivery failure: listener handled the message but sent no response.
+        if (/The message port closed before a response was received/i.test(errMsg)) {
+          resolve();
+          return;
+        }
+        reject(new Error(errMsg));
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+async function setPointerOverlay(tabId, enabled) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      args: [enabled],
+      func: (isEnabled) => {
+        const STORE_KEY = '__tabRecorderPointerStore';
+        const ID = '__tab-recorder-pointer-overlay';
+
+        const getStore = () => {
+          if (!window[STORE_KEY]) {
+            window[STORE_KEY] = {
+              enabled: false,
+              pointerEl: null,
+              rafPending: false,
+              mouseX: -9999,
+              mouseY: -9999,
+            };
+          }
+          return window[STORE_KEY];
+        };
+
+        const ensurePointerElement = () => {
+          const store = getStore();
+          if (store.pointerEl && store.pointerEl.isConnected) return store.pointerEl;
+
+          const existing = document.getElementById(ID);
+          if (existing) {
+            store.pointerEl = existing;
+            return store.pointerEl;
+          }
+
+          const pointerEl = document.createElement('div');
+          pointerEl.id = ID;
+          pointerEl.style.position = 'fixed';
+          pointerEl.style.left = '0';
+          pointerEl.style.top = '0';
+          pointerEl.style.width = '18px';
+          pointerEl.style.height = '18px';
+          pointerEl.style.marginLeft = '-9px';
+          pointerEl.style.marginTop = '-9px';
+          pointerEl.style.border = '2px solid #34d399';
+          pointerEl.style.borderRadius = '999px';
+          pointerEl.style.background =
+            'radial-gradient(circle, rgba(52,211,153,0.95) 0 2px, rgba(16,185,129,0.2) 3px 100%)';
+          pointerEl.style.boxShadow = '0 0 0 1px rgba(0,0,0,0.45)';
+          pointerEl.style.transform = 'translate3d(-9999px, -9999px, 0)';
+          pointerEl.style.opacity = '0';
+          pointerEl.style.zIndex = '2147483647';
+          pointerEl.style.pointerEvents = 'none';
+          pointerEl.style.transition = 'opacity 80ms linear';
+
+          const host = document.documentElement || document.body;
+          host.appendChild(pointerEl);
+          store.pointerEl = pointerEl;
+          return pointerEl;
+        };
+
+        const flushPosition = () => {
+          const store = getStore();
+          store.rafPending = false;
+          const el = ensurePointerElement();
+          el.style.transform = `translate3d(${store.mouseX}px, ${store.mouseY}px, 0)`;
+          if (store.enabled) {
+            el.style.opacity = '1';
+          }
+        };
+
+        const onMouseMove = (event) => {
+          const store = getStore();
+          store.mouseX = event.clientX;
+          store.mouseY = event.clientY;
+          if (!store.rafPending) {
+            store.rafPending = true;
+            requestAnimationFrame(flushPosition);
+          }
+        };
+
+        const onMouseLeave = () => {
+          const store = getStore();
+          if (!store.pointerEl) return;
+          store.pointerEl.style.opacity = '0';
+        };
+
+        const onMouseEnter = () => {
+          const store = getStore();
+          if (!store.enabled || !store.pointerEl) return;
+          store.pointerEl.style.opacity = '1';
+        };
+
+        const store = getStore();
+        if (isEnabled) {
+          if (!store.enabled) {
+            store.enabled = true;
+            ensurePointerElement();
+            window.addEventListener('mousemove', onMouseMove, { passive: true, capture: true });
+            window.addEventListener('mouseleave', onMouseLeave, { passive: true });
+            window.addEventListener('mouseenter', onMouseEnter, { passive: true });
+          }
+        } else if (store.enabled) {
+          store.enabled = false;
+          window.removeEventListener('mousemove', onMouseMove, { capture: true });
+          window.removeEventListener('mouseleave', onMouseLeave);
+          window.removeEventListener('mouseenter', onMouseEnter);
+          if (store.pointerEl) {
+            store.pointerEl.remove();
+            store.pointerEl = null;
+          }
+        }
+      },
+    });
+    return true;
+  } catch (err) {
+    console.warn('[SW] Pointer overlay toggle failed:', err.message);
+    return false;
+  }
+}
+
+async function requestMicPermissionState(tabId) {
+  try {
+    await sendToTab(tabId, { type: 'REQUEST_MIC_PERMISSION_STATE' });
+    sendMicDiagnostic('sw', 'Requested MIC_PERMISSION_STATE from content script');
+    return true;
+  } catch (err) {
+    console.warn('[SW] Mic state request failed:', err.message);
+    sendMicDiagnostic('sw', 'MIC_PERMISSION_STATE request failed', { error: err.message });
+    return false;
+  }
+}
+
+function disablePointerOverlay() {
+  if (!currentShowPointerOption || recordingTabId === null) return;
+  setPointerOverlay(recordingTabId, false).catch(() => {
+    // Best-effort teardown.
+  });
+}
+
+function sendMicDiagnostic(source, message, details) {
+  const payload = { type: 'MIC_DIAGNOSTIC', source, message, details };
+  sendToPopup(payload);
+  console.log('[MIC_DIAG]', source, message, details || '');
 }
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
@@ -347,6 +628,7 @@ function isOffscreenMessage(type) {
     'LIMIT_REACHED',
     'BLOB_READY',
     'MIC_UNAVAILABLE',
+    'MIC_DIAGNOSTIC',
     'CODEC_FALLBACK',
     'CAPTURE_ERROR',
     'RECORDER_ERROR',
