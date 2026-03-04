@@ -24,3 +24,41 @@
 - Verification complete: syntax checks passed for all modified JS files.
 - Coordination artifacts finalized (`tasks.jsonl`, `cycle-contract.json`, review report).
 - Validation scripts referenced by policy are missing in this repository.
+- New task started: `2026-03-04-input-lock`.
+- Scope: add interactivity lock on recorded tab (mouse/keyboard/focus/lifecycle reactions blocked) with popup toggle and reliable cleanup.
+- Content script updated with interaction lock engine:
+  - new `SET_INTERACTION_LOCK` message,
+  - transparent blocking overlay,
+  - keyboard/focus/visibility event suppression,
+  - inert-state apply/restore and `pagehide` cleanup.
+- Service worker integrated with Input Lock:
+  - added `lockInteractions` option (pending/current + GET_STATE),
+  - added `TOGGLE_INTERACTION_LOCK` message,
+  - applies lock at recording start when enabled,
+  - tears lock down on stop and error paths.
+- Popup integrated with Input Lock:
+  - added toggle buttons in idle/recording/paused states,
+  - includes `lockInteractions` in `START_RECORDING`,
+  - syncs `lockInteractions` from `GET_STATE`,
+  - handles `INTERACTION_LOCK_UNAVAILABLE` warning.
+- Input Lock task completed.
+- Verification: all JS syntax checks passed.
+- Review report created: `coordination/reviews/2026-03-04-input-lock-review.md`.
+- Updated `coordination/cycle-contract.json` max_added_lines to 420 to align with implemented cross-file scope.
+- New follow-up task started: `2026-03-04-lock-indicator`.
+- Goal: add dedicated Input Lock active indicator without replacing recording/paused indicators.
+- Added dedicated `Input Lock Active` badges in RECORDING/PAUSED/LIMIT_PAUSED sections.
+- Kept existing recording and pause dot indicators unchanged.
+- Popup JS now updates lock badge visibility based on current state and lock toggle.
+- Lock-indicator follow-up task completed.
+- Verification done: `node --check popup/popup.js` PASS.
+- New follow-up task started: `2026-03-04-cancel-and-lock-fix`.
+- Scope: add cancel/discard flow and fix first input-lock toggle reliability.
+- Implemented cancel/discard flow:
+  - popup sends `CANCEL_RECORDING` from confirming/recording/paused/limit-paused,
+  - SW handles cancel and routes `CANCEL_MEDIA` to offscreen,
+  - offscreen supports discard finalize (`RECORDING_CANCELLED`, no IndexedDB blob write).
+- Fixed first input-lock toggle race:
+  - SW now applies/syncs `TOGGLE_INTERACTION_LOCK` during `CONFIRMING_MIC` via `pendingTabId` and `pendingLockInteractions`.
+- Cancel + first-lock-toggle-fix task completed.
+- Syntax verification passed for SW/offscreen/popup.

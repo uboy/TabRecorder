@@ -12,11 +12,64 @@ if (!window.__tabRecorderInjected) {
   window.__tabRecorderInjected = true;
 
   const POINTER_ID = '__tab-recorder-pointer-overlay';
+  const INTERACTION_LOCK_ID = '__tab-recorder-interaction-lock';
+  const LOCK_OVERLAY_Z_INDEX = '2147483646';
+  const LOCK_OVERLAY_EVENTS = [
+    'pointerdown',
+    'pointerup',
+    'pointermove',
+    'pointercancel',
+    'pointerover',
+    'pointerout',
+    'pointerenter',
+    'pointerleave',
+    'mousedown',
+    'mouseup',
+    'mousemove',
+    'click',
+    'dblclick',
+    'auxclick',
+    'contextmenu',
+    'wheel',
+    'touchstart',
+    'touchmove',
+    'touchend',
+    'touchcancel',
+    'dragstart',
+    'drop',
+  ];
+  const LOCK_WINDOW_EVENTS = [
+    'keydown',
+    'keyup',
+    'keypress',
+    'beforeinput',
+    'input',
+    'compositionstart',
+    'compositionupdate',
+    'compositionend',
+    'paste',
+    'copy',
+    'cut',
+    'focus',
+    'blur',
+  ];
+  const LOCK_DOCUMENT_EVENTS = [
+    'visibilitychange',
+    'focusin',
+    'focusout',
+  ];
+
   let pointerEnabled = false;
   let pointerEl = null;
   let rafPending = false;
   let mouseX = -9999;
   let mouseY = -9999;
+  let interactionLockEnabled = false;
+  let interactionLockEl = null;
+  let lockBodyHadInertAttr = false;
+  let lockBodyInert = false;
+  let lockDocHadInertAttr = false;
+  let lockDocInert = false;
 
   function reportMicPermissionState() {
     navigator.permissions
@@ -117,6 +170,150 @@ if (!window.__tabRecorderInjected) {
     }
   }
 
+  function blockInteractionEvent(event) {
+    if (!interactionLockEnabled) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }
+
+  function addInteractionLockGlobalListeners() {
+    LOCK_WINDOW_EVENTS.forEach((eventType) => {
+      window.addEventListener(eventType, blockInteractionEvent, { capture: true, passive: false });
+    });
+    LOCK_DOCUMENT_EVENTS.forEach((eventType) => {
+      document.addEventListener(eventType, blockInteractionEvent, { capture: true, passive: false });
+    });
+  }
+
+  function removeInteractionLockGlobalListeners() {
+    LOCK_WINDOW_EVENTS.forEach((eventType) => {
+      window.removeEventListener(eventType, blockInteractionEvent, { capture: true });
+    });
+    LOCK_DOCUMENT_EVENTS.forEach((eventType) => {
+      document.removeEventListener(eventType, blockInteractionEvent, { capture: true });
+    });
+  }
+
+  function rememberInertState() {
+    const docEl = document.documentElement;
+    const body = document.body;
+    lockDocHadInertAttr = docEl.hasAttribute('inert');
+    lockDocInert = Boolean(docEl.inert);
+    if (body) {
+      lockBodyHadInertAttr = body.hasAttribute('inert');
+      lockBodyInert = Boolean(body.inert);
+    } else {
+      lockBodyHadInertAttr = false;
+      lockBodyInert = false;
+    }
+  }
+
+  function applyInertState() {
+    const docEl = document.documentElement;
+    const body = document.body;
+    docEl.inert = true;
+    if (body) {
+      body.inert = true;
+    }
+  }
+
+  function restoreInertState() {
+    const docEl = document.documentElement;
+    const body = document.body;
+
+    docEl.inert = lockDocInert;
+    if (!lockDocHadInertAttr) {
+      docEl.removeAttribute('inert');
+    }
+
+    if (!body) return;
+    body.inert = lockBodyInert;
+    if (!lockBodyHadInertAttr) {
+      body.removeAttribute('inert');
+    }
+  }
+
+  function ensureInteractionLockElement() {
+    if (interactionLockEl && interactionLockEl.isConnected) return interactionLockEl;
+
+    const existing = document.getElementById(INTERACTION_LOCK_ID);
+    if (existing) {
+      interactionLockEl = existing;
+      return interactionLockEl;
+    }
+
+    interactionLockEl = document.createElement('div');
+    interactionLockEl.id = INTERACTION_LOCK_ID;
+    interactionLockEl.tabIndex = 0;
+    interactionLockEl.setAttribute('aria-hidden', 'true');
+    interactionLockEl.style.position = 'fixed';
+    interactionLockEl.style.left = '0';
+    interactionLockEl.style.top = '0';
+    interactionLockEl.style.width = '100vw';
+    interactionLockEl.style.height = '100vh';
+    interactionLockEl.style.background = 'transparent';
+    interactionLockEl.style.zIndex = LOCK_OVERLAY_Z_INDEX;
+    interactionLockEl.style.pointerEvents = 'auto';
+    interactionLockEl.style.touchAction = 'none';
+    interactionLockEl.style.userSelect = 'none';
+    interactionLockEl.style.webkitUserSelect = 'none';
+    interactionLockEl.style.cursor = 'default';
+
+    LOCK_OVERLAY_EVENTS.forEach((eventType) => {
+      interactionLockEl.addEventListener(eventType, blockInteractionEvent, {
+        capture: true,
+        passive: false,
+      });
+    });
+
+    const host = document.documentElement || document.body;
+    host.appendChild(interactionLockEl);
+    return interactionLockEl;
+  }
+
+  function destroyInteractionLockElement() {
+    if (!interactionLockEl) return;
+
+    LOCK_OVERLAY_EVENTS.forEach((eventType) => {
+      interactionLockEl.removeEventListener(eventType, blockInteractionEvent, { capture: true });
+    });
+
+    if (interactionLockEl.isConnected) {
+      interactionLockEl.remove();
+    }
+    interactionLockEl = null;
+  }
+
+  function enableInteractionLock() {
+    if (interactionLockEnabled) return;
+    interactionLockEnabled = true;
+
+    rememberInertState();
+    applyInertState();
+    addInteractionLockGlobalListeners();
+
+    const blocker = ensureInteractionLockElement();
+
+    const activeEl = document.activeElement;
+    if (activeEl && typeof activeEl.blur === 'function') {
+      activeEl.blur();
+    }
+
+    try {
+      blocker.focus({ preventScroll: true });
+    } catch {
+      // Best effort only.
+    }
+  }
+
+  function disableInteractionLock() {
+    if (!interactionLockEnabled) return;
+    interactionLockEnabled = false;
+    removeInteractionLockGlobalListeners();
+    destroyInteractionLockElement();
+    restoreInertState();
+  }
+
   reportMicPermissionState();
 
   chrome.runtime.onMessage.addListener((message) => {
@@ -129,14 +326,21 @@ if (!window.__tabRecorderInjected) {
       return false;
     }
 
-    if (message.type !== 'SET_POINTER_OVERLAY') {
+    if (message.type === 'SET_INTERACTION_LOCK') {
+      if (message.enabled) {
+        enableInteractionLock();
+      } else {
+        disableInteractionLock();
+      }
       return false;
     }
 
-    if (message.enabled) {
-      enablePointerOverlay();
-    } else {
-      disablePointerOverlay();
+    if (message.type === 'SET_POINTER_OVERLAY') {
+      if (message.enabled) {
+        enablePointerOverlay();
+      } else {
+        disablePointerOverlay();
+      }
     }
 
     return false;
@@ -144,5 +348,6 @@ if (!window.__tabRecorderInjected) {
 
   window.addEventListener('pagehide', () => {
     disablePointerOverlay();
+    disableInteractionLock();
   });
 }

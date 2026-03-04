@@ -34,6 +34,7 @@ let pendingTabId    = null;
 let pendingTabTitle = '';
 let pendingForceMic = false;
 let pendingShowPointer = false;
+let pendingLockInteractions = false;
 let awaitingMicPermission = false;
 
 // Blob that finished while the popup was closed — delivered on next popup open
@@ -43,6 +44,7 @@ let pendingSuggestedName = '';
 // Current options reflected by popup controls.
 let currentForceMicOption = false;
 let currentShowPointerOption = false;
+let currentInteractionLockOption = false;
 
 // ─── Keepalive alarm ─────────────────────────────────────────────────────────
 
@@ -95,6 +97,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       handleStartRecording(message.tabId, message.tabTitle, {
         forceMic: message.forceMic,
         showPointer: message.showPointer,
+        lockInteractions: message.lockInteractions,
         micDeviceId: message.micDeviceId,
       });
       break;
@@ -109,8 +112,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     case 'STOP_RECORDING':
       if (state === 'RECORDING' || state === 'PAUSED' || state === 'LIMIT_PAUSED') {
+        disableInteractionLock();
         sendToOffscreen({ type: 'STOP_MEDIA', target: 'offscreen' });
         setState('SAVING');
+      }
+      break;
+
+    case 'CANCEL_RECORDING':
+      if (state === 'CONFIRMING_MIC') {
+        disablePointerOverlayForTab(pendingTabId);
+        disableInteractionLockForTab(pendingTabId);
+        resetPendingStartContext();
+        setState('IDLE');
+      } else if (state === 'RECORDING' || state === 'PAUSED' || state === 'LIMIT_PAUSED') {
+        disablePointerOverlay();
+        disableInteractionLock();
+        sendToOffscreen({ type: 'CANCEL_MEDIA', target: 'offscreen' });
+        recordingTabId = null;
+        recordingTabTitle = '';
+        resetPendingStartContext();
+        setState('IDLE');
+        sendToPopup({ type: 'STATE_UPDATE', state: 'IDLE', elapsedSeconds: 0, totalBytes: 0 });
       }
       break;
 
@@ -150,6 +172,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         pendingSuggestedName,
         forceMic:            currentForceMicOption,
         showPointer:         currentShowPointerOption,
+        lockInteractions:    currentInteractionLockOption,
       });
       return true; // keep sendResponse channel open
 
@@ -162,6 +185,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     case 'CONFIRM_STOP_AT_LIMIT':
       if (state === 'LIMIT_PAUSED') {
+        disableInteractionLock();
         sendToOffscreen({ type: 'CONFIRM_STOP_AT_LIMIT', target: 'offscreen' });
         setState('SAVING');
       }
@@ -182,6 +206,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           if (!ok) {
             currentShowPointerOption = false;
             sendToPopup({ type: 'POINTER_UNAVAILABLE' });
+          }
+        });
+      }
+      break;
+
+    case 'TOGGLE_INTERACTION_LOCK':
+      currentInteractionLockOption = Boolean(message.on);
+      if (state === 'CONFIRMING_MIC') {
+        pendingLockInteractions = currentInteractionLockOption;
+        if (pendingTabId !== null) {
+          setInteractionLock(pendingTabId, currentInteractionLockOption).then((ok) => {
+            if (!ok) {
+              pendingLockInteractions = false;
+              currentInteractionLockOption = false;
+              sendToPopup({ type: 'INTERACTION_LOCK_UNAVAILABLE' });
+            }
+          });
+        }
+      } else if ((state === 'RECORDING' || state === 'PAUSED' || state === 'LIMIT_PAUSED') && recordingTabId !== null) {
+        setInteractionLock(recordingTabId, currentInteractionLockOption).then((ok) => {
+          if (!ok) {
+            currentInteractionLockOption = false;
+            sendToPopup({ type: 'INTERACTION_LOCK_UNAVAILABLE' });
           }
         });
       }
@@ -213,15 +260,18 @@ async function handleStartRecording(tabId, tabTitle, options = {}) {
   pendingTabTitle = tabTitle;
   pendingForceMic = Boolean(options.forceMic);
   pendingShowPointer = Boolean(options.showPointer);
+  pendingLockInteractions = Boolean(options.lockInteractions);
   const pendingMicDeviceId = typeof options.micDeviceId === 'string' ? options.micDeviceId : null;
 
   currentForceMicOption = pendingForceMic;
   currentShowPointerOption = pendingShowPointer;
+  currentInteractionLockOption = pendingLockInteractions;
   awaitingMicPermission = !pendingForceMic;
   sendMicDiagnostic('sw', 'handleStartRecording', {
     tabId,
     forceMic: pendingForceMic,
     showPointer: pendingShowPointer,
+    lockInteractions: pendingLockInteractions,
     micDeviceId: pendingMicDeviceId || null,
   });
 
@@ -229,6 +279,11 @@ async function handleStartRecording(tabId, tabTitle, options = {}) {
     await ensureContentScriptInjected(tabId);
   } catch (err) {
     console.warn('[SW] Could not inject content script:', err.message);
+    if (pendingLockInteractions) {
+      pendingLockInteractions = false;
+      currentInteractionLockOption = false;
+      sendToPopup({ type: 'INTERACTION_LOCK_UNAVAILABLE' });
+    }
 
     if (pendingForceMic) {
       awaitingMicPermission = false;
@@ -237,6 +292,7 @@ async function handleStartRecording(tabId, tabTitle, options = {}) {
         pendingTabTitle,
         true,
         pendingShowPointer,
+        pendingLockInteractions,
         { forceMic: true, micDeviceId: pendingMicDeviceId }
       );
     } else {
@@ -256,6 +312,15 @@ async function handleStartRecording(tabId, tabTitle, options = {}) {
     }
   }
 
+  if (pendingLockInteractions) {
+    const lockEnabled = await setInteractionLock(tabId, true);
+    if (!lockEnabled) {
+      pendingLockInteractions = false;
+      currentInteractionLockOption = false;
+      sendToPopup({ type: 'INTERACTION_LOCK_UNAVAILABLE' });
+    }
+  }
+
   if (pendingForceMic) {
     awaitingMicPermission = false;
     sendMicDiagnostic('sw', 'Force mic path selected, skipping MIC_PERMISSION_STATE confirmation');
@@ -264,6 +329,7 @@ async function handleStartRecording(tabId, tabTitle, options = {}) {
       pendingTabTitle,
       true,
       pendingShowPointer,
+      pendingLockInteractions,
       { forceMic: true, micDeviceId: pendingMicDeviceId }
     );
     return;
@@ -288,13 +354,16 @@ function handleMicPermissionState(permState) {
     sendToPopup({ type: 'CONFIRM_MIC' });
   } else {
     // Skip mic dialog — proceed directly to capture
-    startCapture(pendingTabId, pendingTabTitle, false, pendingShowPointer);
+    startCapture(pendingTabId, pendingTabTitle, false, pendingShowPointer, pendingLockInteractions);
   }
 }
 
 function handleMicAnswer(include) {
+  if (state !== 'CONFIRMING_MIC') {
+    return;
+  }
   sendMicDiagnostic('sw', 'MIC_ANSWER received', { include });
-  startCapture(pendingTabId, pendingTabTitle, include, pendingShowPointer, {
+  startCapture(pendingTabId, pendingTabTitle, include, pendingShowPointer, pendingLockInteractions, {
     forceMic: false,
     micDeviceId: null,
   });
@@ -315,6 +384,8 @@ function handleOffscreenMessage(message) {
 
     case 'BLOB_READY':
       disablePointerOverlay();
+      disableInteractionLock();
+      resetPendingStartContext();
       setState('IDLE');
       recordingTabId    = null;
       recordingTabTitle = '';
@@ -331,6 +402,16 @@ function handleOffscreenMessage(message) {
       sendToPopup(message);
       break;
 
+    case 'RECORDING_CANCELLED':
+      disablePointerOverlay();
+      disableInteractionLock();
+      resetPendingStartContext();
+      setState('IDLE');
+      recordingTabId    = null;
+      recordingTabTitle = '';
+      sendToPopup({ type: 'STATE_UPDATE', state: 'IDLE', elapsedSeconds: 0, totalBytes: 0 });
+      break;
+
     case 'MIC_UNAVAILABLE':
     case 'CODEC_FALLBACK':
       sendToPopup(message);
@@ -345,6 +426,8 @@ function handleOffscreenMessage(message) {
     case 'BLOB_READY_ERROR':
       console.error('[SW] Offscreen error:', message.type, message.error);
       disablePointerOverlay();
+      disableInteractionLock();
+      resetPendingStartContext();
       setState('IDLE');
       recordingTabId    = null;
       recordingTabTitle = '';
@@ -358,17 +441,20 @@ function handleOffscreenMessage(message) {
 
 // ─── startCapture ─────────────────────────────────────────────────────────────
 
-async function startCapture(tabId, tabTitle, includeMic, showPointer, micOptions = {}) {
+async function startCapture(tabId, tabTitle, includeMic, showPointer, lockInteractions, micOptions = {}) {
   recordingTabId    = tabId;
   recordingTabTitle = tabTitle;
   pendingShowPointer = Boolean(showPointer);
+  pendingLockInteractions = Boolean(lockInteractions);
   currentShowPointerOption = pendingShowPointer;
+  currentInteractionLockOption = pendingLockInteractions;
   sendMicDiagnostic('sw', 'startCapture called', {
     tabId,
     includeMic: Boolean(includeMic),
     forceMic: Boolean(micOptions.forceMic),
     micDeviceId: typeof micOptions.micDeviceId === 'string' ? micOptions.micDeviceId : null,
     showPointer: pendingShowPointer,
+    lockInteractions: pendingLockInteractions,
   });
 
   // Ensure the offscreen document is READY before calling getMediaStreamId.
@@ -381,6 +467,7 @@ async function startCapture(tabId, tabTitle, includeMic, showPointer, micOptions
   } catch (err) {
     console.error('[SW] Failed to create offscreen document:', err);
     disablePointerOverlay();
+    disableInteractionLock();
     setState('IDLE');
     sendToPopup({ type: 'RECORDING_ERROR', error: err.message });
     return;
@@ -391,6 +478,7 @@ async function startCapture(tabId, tabTitle, includeMic, showPointer, micOptions
       const errMsg = chrome.runtime.lastError?.message ?? 'getMediaStreamId failed';
       console.error('[SW] tabCapture.getMediaStreamId error:', errMsg);
       disablePointerOverlay();
+      disableInteractionLock();
       setState('IDLE');
       sendToPopup({ type: 'RECORDING_ERROR', error: errMsg });
       return;
@@ -588,11 +676,51 @@ async function requestMicPermissionState(tabId) {
   }
 }
 
+async function setInteractionLock(tabId, enabled) {
+  try {
+    await sendToTab(tabId, { type: 'SET_INTERACTION_LOCK', enabled });
+    return true;
+  } catch (err) {
+    console.warn('[SW] Interaction lock toggle failed:', err.message);
+    return false;
+  }
+}
+
 function disablePointerOverlay() {
   if (!currentShowPointerOption || recordingTabId === null) return;
   setPointerOverlay(recordingTabId, false).catch(() => {
     // Best-effort teardown.
   });
+}
+
+function disablePointerOverlayForTab(tabId) {
+  if (tabId === null || tabId === undefined) return;
+  setPointerOverlay(tabId, false).catch(() => {
+    // Best-effort teardown.
+  });
+}
+
+function disableInteractionLock() {
+  if (recordingTabId === null) return;
+  setInteractionLock(recordingTabId, false).catch(() => {
+    // Best-effort teardown.
+  });
+}
+
+function disableInteractionLockForTab(tabId) {
+  if (tabId === null || tabId === undefined) return;
+  setInteractionLock(tabId, false).catch(() => {
+    // Best-effort teardown.
+  });
+}
+
+function resetPendingStartContext() {
+  pendingTabId = null;
+  pendingTabTitle = '';
+  pendingForceMic = false;
+  pendingShowPointer = false;
+  pendingLockInteractions = false;
+  awaitingMicPermission = false;
 }
 
 function sendMicDiagnostic(source, message, details) {
@@ -660,6 +788,7 @@ function isOffscreenMessage(type) {
     'CAPTURE_ERROR',
     'RECORDER_ERROR',
     'BLOB_READY_ERROR',
+    'RECORDING_CANCELLED',
   ].includes(type);
 }
 

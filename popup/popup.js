@@ -26,6 +26,7 @@ let recordingTabTitle = '';     // title of the tab being recorded (from SW)
 let monitorOn         = true;   // whether tab audio plays to speakers
 let forceMicEnabled   = false;  // include microphone even without mic confirmation flow
 let pointerEnabled    = false;  // draw pointer overlay in recorded tab
+let interactionLockEnabled = false; // block interaction with recorded tab
 let forcedMicDeviceId = null;   // concrete input device selected during forced mic access check
 const MAX_DIAG_LINES  = 120;
 
@@ -36,10 +37,14 @@ const elTimer        = document.getElementById('timer');
 const elSizeDisplay  = document.getElementById('size-display');
 const elPausedTimer  = document.getElementById('timer-paused');
 const elPausedSizeDisplay = document.getElementById('size-display-paused');
+const elLockIndicatorRecording = document.getElementById('lock-indicator-recording');
+const elLockIndicatorPaused = document.getElementById('lock-indicator-paused');
+const elLockIndicatorLimit = document.getElementById('lock-indicator-limit');
 const elErrorText    = document.getElementById('error-text');
 const elMicWarning   = document.getElementById('mic-warning');
 const elCodecWarning = document.getElementById('codec-warning');
 const elPointerWarn  = document.getElementById('pointer-warning');
+const elInteractionLockWarn = document.getElementById('interaction-lock-warning');
 const elMicPermStatus = document.getElementById('mic-perm-status');
 const elDiagLog      = document.getElementById('diag-log');
 
@@ -48,11 +53,18 @@ const btnPause       = document.getElementById('btn-pause');
 const btnResume      = document.getElementById('btn-resume');
 const btnStop        = document.getElementById('btn-stop');
 const btnStopPaused  = document.getElementById('btn-stop-paused');
+const btnCancelConfirming = document.getElementById('btn-cancel-confirming');
+const btnCancelRecording = document.getElementById('btn-cancel-recording');
+const btnCancelPaused = document.getElementById('btn-cancel-paused');
+const btnCancelLimit = document.getElementById('btn-cancel-limit');
 const btnMonitor     = document.getElementById('btn-monitor');
 const btnForceMic    = document.getElementById('btn-force-mic');
 const btnForceMicRec = document.getElementById('btn-force-mic-recording');
 const btnPointerIdle = document.getElementById('btn-pointer-idle');
 const btnPointerRec  = document.getElementById('btn-pointer-recording');
+const btnLockIdle    = document.getElementById('btn-lock-idle');
+const btnLockRec     = document.getElementById('btn-lock-recording');
+const btnLockPaused  = document.getElementById('btn-lock-paused');
 const btnGrantMic    = document.getElementById('btn-grant-mic');
 const btnContinue    = document.getElementById('btn-continue');
 const btnStopLimit   = document.getElementById('btn-stop-limit');
@@ -98,8 +110,13 @@ document.addEventListener('DOMContentLoaded', () => {
       if (typeof response.showPointer === 'boolean') {
         pointerEnabled = response.showPointer;
       }
+      if (typeof response.lockInteractions === 'boolean') {
+        interactionLockEnabled = response.lockInteractions;
+      }
       updateForceMicButton();
       updatePointerButtons();
+      updateInteractionLockButtons();
+      updateInteractionLockIndicators();
 
       // A blob finished while popup was closed — recover via save dialog.
       if (response.pendingBlobKey) {
@@ -117,11 +134,18 @@ document.addEventListener('DOMContentLoaded', () => {
   btnResume.addEventListener('click',      onResumeClick);
   btnStop.addEventListener('click',        onStopClick);
   btnStopPaused.addEventListener('click',  onStopClick);
+  btnCancelConfirming.addEventListener('click', onCancelRecordingClick);
+  btnCancelRecording.addEventListener('click',  onCancelRecordingClick);
+  btnCancelPaused.addEventListener('click',     onCancelRecordingClick);
+  btnCancelLimit.addEventListener('click',      onCancelRecordingClick);
   btnMonitor.addEventListener('click',     onMonitorClick);
   btnForceMic.addEventListener('click',    onForceMicClick);
   btnForceMicRec.addEventListener('click', onForceMicClick);
   btnPointerIdle.addEventListener('click', onPointerClick);
   btnPointerRec.addEventListener('click',  onPointerClick);
+  btnLockIdle.addEventListener('click',    onInteractionLockClick);
+  btnLockRec.addEventListener('click',     onInteractionLockClick);
+  btnLockPaused.addEventListener('click',  onInteractionLockClick);
   btnGrantMic.addEventListener('click',    onGrantMicClick);
   btnContinue.addEventListener('click',    onContinueClick);
   btnStopLimit.addEventListener('click',   onStopLimitClick);
@@ -133,6 +157,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   updateForceMicButton();
   updatePointerButtons();
+  updateInteractionLockButtons();
+  updateInteractionLockIndicators();
   refreshMicPermissionStatus();
   addDiag('popup', 'Initialized popup');
 
@@ -196,6 +222,14 @@ function handlePortMessage(message) {
       addDiag('sw', 'Pointer overlay unavailable');
       break;
 
+    case 'INTERACTION_LOCK_UNAVAILABLE':
+      interactionLockEnabled = false;
+      updateInteractionLockButtons();
+      updateInteractionLockIndicators();
+      showBannerTemporarily(elInteractionLockWarn, 4000);
+      addDiag('sw', 'Input lock unavailable');
+      break;
+
     case 'MIC_DIAGNOSTIC':
       addDiag(message.source || 'mic', message.message || 'diagnostic', message.details);
       break;
@@ -254,11 +288,13 @@ async function onStartClick() {
     tabTitle: activeTabTitle,
     forceMic: forceMicEnabled,
     showPointer: pointerEnabled,
+    lockInteractions: interactionLockEnabled,
     micDeviceId: forcedMicDeviceId,
   });
   addDiag('popup', 'START_RECORDING sent', {
     forceMicEnabled,
     pointerEnabled,
+    interactionLockEnabled,
     micDeviceId: forcedMicDeviceId || null,
   });
 }
@@ -289,6 +325,19 @@ function onPauseClick() {
 function onResumeClick() {
   sendMsg({ type: 'RESUME_RECORDING' });
   renderState('RECORDING');
+}
+
+function onCancelRecordingClick() {
+  const confirmed = window.confirm('Cancel recording and discard captured data?');
+  if (!confirmed) {
+    return;
+  }
+
+  fileHandle = null;
+  partialBlobKey = null;
+  sendMsg({ type: 'CANCEL_RECORDING' });
+  addDiag('popup', 'CANCEL_RECORDING sent');
+  renderState('IDLE');
 }
 
 function onMonitorClick() {
@@ -326,6 +375,14 @@ function onPointerClick() {
     sendMsg({ type: 'TOGGLE_POINTER', on: pointerEnabled });
     addDiag('popup', 'TOGGLE_POINTER sent during recording', { pointerEnabled });
   }
+}
+
+function onInteractionLockClick() {
+  interactionLockEnabled = !interactionLockEnabled;
+  updateInteractionLockButtons();
+  updateInteractionLockIndicators();
+  sendMsg({ type: 'TOGGLE_INTERACTION_LOCK', on: interactionLockEnabled });
+  addDiag('popup', `Input Lock toggled: ${interactionLockEnabled ? 'ON' : 'OFF'}`);
 }
 
 function onContinueClick() {
@@ -536,6 +593,7 @@ function renderState(state, elapsedSeconds = 0, totalBytes = 0) {
   if (elPausedSizeDisplay) {
     elPausedSizeDisplay.textContent = formatBytes(totalBytes);
   }
+  updateInteractionLockIndicators();
 }
 
 function updateMonitorButton() {
@@ -570,6 +628,41 @@ function updatePointerButtons() {
   if (btnPointerRec) {
     btnPointerRec.textContent = label;
     setToggleButtonState(btnPointerRec, pointerEnabled);
+  }
+}
+
+function updateInteractionLockButtons() {
+  const label = interactionLockEnabled ? 'Input Lock: On' : 'Input Lock: Off';
+
+  if (btnLockIdle) {
+    btnLockIdle.textContent = label;
+    setToggleButtonState(btnLockIdle, interactionLockEnabled);
+  }
+
+  if (btnLockRec) {
+    btnLockRec.textContent = label;
+    setToggleButtonState(btnLockRec, interactionLockEnabled);
+  }
+
+  if (btnLockPaused) {
+    btnLockPaused.textContent = label;
+    setToggleButtonState(btnLockPaused, interactionLockEnabled);
+  }
+}
+
+function updateInteractionLockIndicators() {
+  const showInRecording = interactionLockEnabled && currentState === 'RECORDING';
+  const showInPaused = interactionLockEnabled && currentState === 'PAUSED';
+  const showInLimitPaused = interactionLockEnabled && currentState === 'LIMIT_PAUSED';
+
+  if (elLockIndicatorRecording) {
+    elLockIndicatorRecording.hidden = !showInRecording;
+  }
+  if (elLockIndicatorPaused) {
+    elLockIndicatorPaused.hidden = !showInPaused;
+  }
+  if (elLockIndicatorLimit) {
+    elLockIndicatorLimit.hidden = !showInLimitPaused;
   }
 }
 

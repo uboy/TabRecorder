@@ -192,15 +192,24 @@ function resetSession() {
 
 // ─── Finalize recording: assemble blob → IndexedDB → notify SW ───────────────
 
-function finalizeRecording() {
+function finalizeRecording({ discard = false } = {}) {
   return new Promise((resolve) => {
     if (!recorder) {
+      if (discard) {
+        resetSession();
+        sendToSW({ type: 'RECORDING_CANCELLED' });
+      }
       resolve();
       return;
     }
 
     recorder.onstop = async () => {
       try {
+        if (discard) {
+          sendToSW({ type: 'RECORDING_CANCELLED' });
+          return;
+        }
+
         const blob    = new Blob(chunks, { type: 'video/webm' });
         const blobKey = generateUUID();
 
@@ -504,6 +513,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       pauseElapsedSegment();
       finalizeRecording().catch((err) => {
         console.error('[offscreen] finalizeRecording error:', err);
+      });
+      break;
+
+    case 'CANCEL_MEDIA':
+      stopInterval();
+      pauseElapsedSegment();
+      finalizeRecording({ discard: true }).catch((err) => {
+        console.error('[offscreen] cancel finalizeRecording error:', err);
       });
       break;
 

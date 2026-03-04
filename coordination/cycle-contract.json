@@ -1,5 +1,5 @@
 {
-  "task_id": "2026-03-04-manual-pause",
+  "task_id": "2026-03-04-cancel-and-lock-fix",
   "implementation_agent": "codex",
   "review_agent": "code-review-qa",
   "required_commands": [
@@ -8,14 +8,12 @@
     "node --check popup/popup.js"
   ],
   "required_artifacts": [
-    ".scratchpad/research.md",
-    ".scratchpad/plan.md",
     "coordination/tasks.jsonl",
-    "coordination/reviews/2026-03-04-manual-pause-review.md"
+    "coordination/reviews/2026-03-04-cancel-and-lock-fix-review.md"
   ],
   "size_limits": {
-    "max_files_changed": 8,
-    "max_added_lines": 260
+    "max_files_changed": 7,
+    "max_added_lines": 240
   },
   "status": "completed"
 }

@@ -23,6 +23,9 @@
     <div id="pointer-warning" class="banner banner-warn" hidden>
       Pointer overlay is unavailable on this page
     </div>
+    <div id="interaction-lock-warning" class="banner banner-warn" hidden>
+      Input lock is unavailable on this page
+    </div>
 
     <!-- ── IDLE state ─────────────────────────────────────────── -->
     <section class="state-section section-idle">
@@ -33,6 +36,7 @@
       <div class="btn-row settings-row">
         <button id="btn-force-mic" class="btn btn-secondary btn-toggle-off">Force Mic: Off</button>
         <button id="btn-pointer-idle" class="btn btn-secondary btn-toggle-off">Pointer: Off</button>
+        <button id="btn-lock-idle" class="btn btn-secondary btn-toggle-off">Input Lock: Off</button>
         <button id="btn-grant-mic" class="btn btn-secondary">Grant Mic</button>
       </div>
       <div id="mic-perm-status" class="perm-status perm-unknown">Mic permission: checking...</div>
@@ -48,6 +52,7 @@
       <div class="btn-row">
         <button id="btn-mic-yes" class="btn btn-primary">Yes</button>
         <button id="btn-mic-no"  class="btn btn-secondary">No</button>
+        <button id="btn-cancel-confirming" class="btn btn-secondary">Cancel</button>
       </div>
     </section>
 
@@ -56,6 +61,7 @@
       <div class="status-row">
         <span class="dot dot-recording" aria-label="Recording">●</span>
         <span class="status-label">Recording</span>
+        <span id="lock-indicator-recording" class="lock-indicator" hidden>Input Lock Active</span>
         <span id="timer" class="timer">00:00:00</span>
       </div>
       <div class="size-row">
@@ -64,8 +70,10 @@
       <div class="btn-row">
         <button id="btn-force-mic-recording" class="btn btn-secondary btn-toggle-off">Force Mic: Off</button>
         <button id="btn-pointer-recording" class="btn btn-secondary btn-toggle-off">Pointer: Off</button>
+        <button id="btn-lock-recording" class="btn btn-secondary btn-toggle-off">Input Lock: Off</button>
         <button id="btn-monitor" class="btn btn-secondary btn-monitor-on">Tab audio: On</button>
         <button id="btn-pause"   class="btn btn-secondary">Pause</button>
+        <button id="btn-cancel-recording" class="btn btn-secondary">Cancel</button>
         <button id="btn-stop"    class="btn btn-danger">Stop &amp; Save</button>
       </div>
     </section>
@@ -75,6 +83,7 @@
       <div class="status-row">
         <span class="dot dot-paused">⏸</span>
         <span class="status-label">Recording paused</span>
+        <span id="lock-indicator-paused" class="lock-indicator" hidden>Input Lock Active</span>
         <span id="timer-paused" class="timer">00:00:00</span>
       </div>
       <div class="size-row">
@@ -82,6 +91,8 @@
       </div>
       <div class="btn-row">
         <button id="btn-resume" class="btn btn-primary">Resume</button>
+        <button id="btn-lock-paused" class="btn btn-secondary btn-toggle-off">Input Lock: Off</button>
+        <button id="btn-cancel-paused" class="btn btn-secondary">Cancel</button>
         <button id="btn-stop-paused" class="btn btn-danger">Stop &amp; Save</button>
       </div>
     </section>
@@ -91,9 +102,11 @@
       <div class="status-row">
         <span class="dot dot-warning">⚠</span>
         <span class="status-label">Recording limit reached. Paused.</span>
+        <span id="lock-indicator-limit" class="lock-indicator" hidden>Input Lock Active</span>
       </div>
       <div class="btn-row">
         <button id="btn-continue"    class="btn btn-primary">Continue</button>
+        <button id="btn-cancel-limit" class="btn btn-secondary">Cancel</button>
         <button id="btn-stop-limit"  class="btn btn-danger">Stop &amp; Save</button>
       </div>
     </section>
