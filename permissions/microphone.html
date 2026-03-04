@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Grant Microphone Access</title>
+    <style>
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 20px;
+        font-family: system-ui, -apple-system, sans-serif;
+        background: #111827;
+        color: #e5e7eb;
+      }
+      .wrap { max-width: 760px; margin: 0 auto; }
+      h1 { margin: 0 0 10px; font-size: 22px; }
+      p { margin: 0 0 12px; color: #cbd5e1; }
+      .btn {
+        border: 0;
+        border-radius: 8px;
+        padding: 10px 14px;
+        font-size: 14px;
+        cursor: pointer;
+      }
+      .btn-primary { background: #2563eb; color: #fff; }
+      .btn-secondary { background: #374151; color: #e5e7eb; margin-left: 8px; }
+      .log {
+        margin-top: 14px;
+        background: #0b1220;
+        border: 1px solid #334155;
+        border-radius: 6px;
+        padding: 10px;
+        font-family: Consolas, "Courier New", monospace;
+        font-size: 12px;
+        white-space: pre-wrap;
+        word-break: break-word;
+        max-height: 280px;
+        overflow: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="wrap">
+      <h1>Microphone Permission</h1>
+      <p>Нажмите кнопку ниже, чтобы дать расширению доступ к микрофону.</p>
+      <button id="btn-grant" class="btn btn-primary">Grant Microphone Access</button>
+      <button id="btn-close" class="btn btn-secondary">Close</button>
+      <pre id="log" class="log">[helper] ready</pre>
+    </main>
+    <script src="microphone.js"></script>
+  </body>
+</html>

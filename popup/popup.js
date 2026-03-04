@@ -34,6 +34,8 @@ const MAX_DIAG_LINES  = 120;
 const elTabTitle     = document.getElementById('tab-title');
 const elTimer        = document.getElementById('timer');
 const elSizeDisplay  = document.getElementById('size-display');
+const elPausedTimer  = document.getElementById('timer-paused');
+const elPausedSizeDisplay = document.getElementById('size-display-paused');
 const elErrorText    = document.getElementById('error-text');
 const elMicWarning   = document.getElementById('mic-warning');
 const elCodecWarning = document.getElementById('codec-warning');
@@ -42,7 +44,10 @@ const elMicPermStatus = document.getElementById('mic-perm-status');
 const elDiagLog      = document.getElementById('diag-log');
 
 const btnStart       = document.getElementById('btn-start');
+const btnPause       = document.getElementById('btn-pause');
+const btnResume      = document.getElementById('btn-resume');
 const btnStop        = document.getElementById('btn-stop');
+const btnStopPaused  = document.getElementById('btn-stop-paused');
 const btnMonitor     = document.getElementById('btn-monitor');
 const btnForceMic    = document.getElementById('btn-force-mic');
 const btnForceMicRec = document.getElementById('btn-force-mic-recording');
@@ -108,7 +113,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // 4. Wire up button handlers
   btnStart.addEventListener('click',       onStartClick);
+  btnPause.addEventListener('click',       onPauseClick);
+  btnResume.addEventListener('click',      onResumeClick);
   btnStop.addEventListener('click',        onStopClick);
+  btnStopPaused.addEventListener('click',  onStopClick);
   btnMonitor.addEventListener('click',     onMonitorClick);
   btnForceMic.addEventListener('click',    onForceMicClick);
   btnForceMicRec.addEventListener('click', onForceMicClick);
@@ -138,7 +146,7 @@ document.addEventListener('DOMContentLoaded', () => {
 // ─── beforeunload guard ───────────────────────────────────────────────────────
 
 window.addEventListener('beforeunload', (e) => {
-  if (currentState === 'RECORDING' || currentState === 'LIMIT_PAUSED') {
+  if (currentState === 'RECORDING' || currentState === 'PAUSED' || currentState === 'LIMIT_PAUSED') {
     const msg = 'Recording is in progress. Stop recording before closing.';
     e.returnValue = msg;
     return msg;
@@ -273,6 +281,16 @@ async function onStopClick() {
   renderState('SAVING');
 }
 
+function onPauseClick() {
+  sendMsg({ type: 'PAUSE_RECORDING' });
+  renderState('PAUSED');
+}
+
+function onResumeClick() {
+  sendMsg({ type: 'RESUME_RECORDING' });
+  renderState('RECORDING');
+}
+
 function onMonitorClick() {
   monitorOn = !monitorOn;
   updateMonitorButton();
@@ -281,7 +299,7 @@ function onMonitorClick() {
 
 function onForceMicClick() {
   const appliesNextRecording =
-    currentState === 'RECORDING' || currentState === 'LIMIT_PAUSED';
+    currentState === 'RECORDING' || currentState === 'PAUSED' || currentState === 'LIMIT_PAUSED';
 
   forceMicEnabled = !forceMicEnabled;
   updateForceMicButton();
@@ -304,7 +322,7 @@ function onPointerClick() {
   updatePointerButtons();
   addDiag('popup', `Pointer toggled: ${pointerEnabled ? 'ON' : 'OFF'}`);
 
-  if (currentState === 'RECORDING' || currentState === 'LIMIT_PAUSED') {
+  if (currentState === 'RECORDING' || currentState === 'PAUSED' || currentState === 'LIMIT_PAUSED') {
     sendMsg({ type: 'TOGGLE_POINTER', on: pointerEnabled });
     addDiag('popup', 'TOGGLE_POINTER sent during recording', { pointerEnabled });
   }
@@ -496,12 +514,12 @@ async function showRetryPrompt(blobKey, suggestedName) {
  * @param {number} [totalBytes]
  */
 function renderState(state, elapsedSeconds = 0, totalBytes = 0) {
-  const wasRecording = currentState === 'RECORDING';
+  const wasActiveRecording = currentState === 'RECORDING' || currentState === 'PAUSED';
   currentState = state;
   document.body.dataset.state = state;
 
   // Reset monitor toggle when a fresh recording begins.
-  if (state === 'RECORDING' && !wasRecording) {
+  if (state === 'RECORDING' && !wasActiveRecording) {
     monitorOn = true;
     updateMonitorButton();
   }
@@ -511,6 +529,12 @@ function renderState(state, elapsedSeconds = 0, totalBytes = 0) {
   }
   if (elSizeDisplay) {
     elSizeDisplay.textContent = formatBytes(totalBytes);
+  }
+  if (elPausedTimer) {
+    elPausedTimer.textContent = formatDuration(elapsedSeconds);
+  }
+  if (elPausedSizeDisplay) {
+    elPausedSizeDisplay.textContent = formatBytes(totalBytes);
   }
 }
 

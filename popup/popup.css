@@ -52,6 +52,7 @@ header {
 body[data-state="IDLE"]           .section-idle           { display: block; }
 body[data-state="CONFIRMING_MIC"] .section-confirming-mic { display: block; }
 body[data-state="RECORDING"]      .section-recording      { display: block; }
+body[data-state="PAUSED"]         .section-paused         { display: block; }
 body[data-state="LIMIT_PAUSED"]   .section-limit-paused   { display: block; }
 body[data-state="SAVING"]         .section-saving         { display: block; }
 body[data-state="ERROR"]          .section-error          { display: block; }
@@ -93,6 +94,10 @@ body[data-state="ERROR"]          .section-error          { display: block; }
 
 .dot-warning {
   color: #e0a020;
+}
+
+.dot-paused {
+  color: #fbbf24;
 }
 
 /* ── Timer ────────────────────────────────────────────────────────────────── */

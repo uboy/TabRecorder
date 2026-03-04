@@ -1,0 +1,21 @@
+{
+  "task_id": "2026-03-04-manual-pause",
+  "implementation_agent": "codex",
+  "review_agent": "code-review-qa",
+  "required_commands": [
+    "node --check service-worker.js",
+    "node --check offscreen/offscreen.js",
+    "node --check popup/popup.js"
+  ],
+  "required_artifacts": [
+    ".scratchpad/research.md",
+    ".scratchpad/plan.md",
+    "coordination/tasks.jsonl",
+    "coordination/reviews/2026-03-04-manual-pause-review.md"
+  ],
+  "size_limits": {
+    "max_files_changed": 8,
+    "max_added_lines": 260
+  },
+  "status": "completed"
+}

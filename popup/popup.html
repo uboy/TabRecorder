@@ -65,7 +65,24 @@
         <button id="btn-force-mic-recording" class="btn btn-secondary btn-toggle-off">Force Mic: Off</button>
         <button id="btn-pointer-recording" class="btn btn-secondary btn-toggle-off">Pointer: Off</button>
         <button id="btn-monitor" class="btn btn-secondary btn-monitor-on">Tab audio: On</button>
+        <button id="btn-pause"   class="btn btn-secondary">Pause</button>
         <button id="btn-stop"    class="btn btn-danger">Stop &amp; Save</button>
+      </div>
+    </section>
+
+    <!-- ── PAUSED state (manual pause) ───────────────────────── -->
+    <section class="state-section section-paused">
+      <div class="status-row">
+        <span class="dot dot-paused">⏸</span>
+        <span class="status-label">Recording paused</span>
+        <span id="timer-paused" class="timer">00:00:00</span>
+      </div>
+      <div class="size-row">
+        Size: <span id="size-display-paused">0 B</span>
+      </div>
+      <div class="btn-row">
+        <button id="btn-resume" class="btn btn-primary">Resume</button>
+        <button id="btn-stop-paused" class="btn btn-danger">Stop &amp; Save</button>
       </div>
     </section>
 

@@ -30,7 +30,8 @@ let recorder      = null;
 let mixer         = null;
 let chunks        = [];
 let totalBytes    = 0;
-let startTime     = null;
+let elapsedBaseMs = 0;     // accumulated active recording time before current segment
+let segmentStartedAt = null; // Date.now() when active recording segment started
 let intervalId    = null;
 let suggestedName = '';
 let tabStream     = null;
@@ -89,10 +90,38 @@ function stopInterval() {
   }
 }
 
+function getElapsedMs() {
+  if (segmentStartedAt === null) {
+    return elapsedBaseMs;
+  }
+  return elapsedBaseMs + (Date.now() - segmentStartedAt);
+}
+
+function getElapsedSeconds() {
+  return Math.floor(getElapsedMs() / 1000);
+}
+
+function beginElapsedSegment({ reset = false } = {}) {
+  if (reset) {
+    elapsedBaseMs = 0;
+  }
+  segmentStartedAt = Date.now();
+}
+
+function pauseElapsedSegment({ reset = false } = {}) {
+  if (segmentStartedAt !== null) {
+    elapsedBaseMs += Date.now() - segmentStartedAt;
+    segmentStartedAt = null;
+  }
+  if (reset) {
+    elapsedBaseMs = 0;
+  }
+}
+
 function startInterval() {
   stopInterval();
   intervalId = setInterval(() => {
-    const elapsedSeconds = Math.floor((Date.now() - startTime) / 1000);
+    const elapsedSeconds = getElapsedSeconds();
 
     sendToSW({
       type: 'STATE_UPDATE',
@@ -112,6 +141,7 @@ function startInterval() {
 
 function triggerLimit(reason) {
   stopInterval();
+  pauseElapsedSegment();
   if (recorder && recorder.state === 'recording') {
     recorder.pause();
   }
@@ -154,7 +184,8 @@ function resetSession() {
   mixer         = null;
   chunks        = [];
   totalBytes    = 0;
-  startTime     = null;
+  elapsedBaseMs = 0;
+  segmentStartedAt = null;
   suggestedName = '';
   stopAllTracks();
 }
@@ -392,7 +423,7 @@ async function handleStartMedia({ streamId, includeMic, forceMic, micDeviceId, s
   });
 
   // 8. Track wall-clock start time and begin broadcasting STATE_UPDATE
-  startTime = Date.now();
+  beginElapsedSegment({ reset: true });
   startInterval();
 
   // 9. Start monitoring — play captured audio to speakers by default.
@@ -416,12 +447,46 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
     case 'CONFIRM_CONTINUE':
       // Reset limit counters and resume recording
-      startTime  = Date.now();
       totalBytes = 0;
       if (recorder && recorder.state === 'paused') {
         recorder.resume();
       }
+      beginElapsedSegment({ reset: true });
+      sendToSW({
+        type: 'STATE_UPDATE',
+        state: 'RECORDING',
+        elapsedSeconds: getElapsedSeconds(),
+        totalBytes,
+      });
       startInterval();
+      break;
+
+    case 'PAUSE_MEDIA':
+      stopInterval();
+      pauseElapsedSegment();
+      if (recorder && recorder.state === 'recording') {
+        recorder.pause();
+      }
+      sendToSW({
+        type: 'STATE_UPDATE',
+        state: 'PAUSED',
+        elapsedSeconds: getElapsedSeconds(),
+        totalBytes,
+      });
+      break;
+
+    case 'RESUME_MEDIA':
+      if (recorder && recorder.state === 'paused') {
+        recorder.resume();
+        beginElapsedSegment();
+        startInterval();
+      }
+      sendToSW({
+        type: 'STATE_UPDATE',
+        state: 'RECORDING',
+        elapsedSeconds: getElapsedSeconds(),
+        totalBytes,
+      });
       break;
 
     case 'MONITOR_ON':
@@ -436,6 +501,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     case 'CONFIRM_STOP_AT_LIMIT':
     case 'TAB_CLOSED_INTERRUPT':
       stopInterval();
+      pauseElapsedSegment();
       finalizeRecording().catch((err) => {
         console.error('[offscreen] finalizeRecording error:', err);
       });

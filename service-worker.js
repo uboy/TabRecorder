@@ -6,13 +6,14 @@
  * monitors tab lifecycle.
  *
  * State machine:
- *   IDLE → CONFIRMING_MIC → RECORDING → LIMIT_PAUSED → SAVING → IDLE
+ *   IDLE → CONFIRMING_MIC → RECORDING → PAUSED → RECORDING
+ *                        ↘ LIMIT_PAUSED ↗
  *                        ↘ (no mic)  ↗
  */
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
-/** @type {'IDLE'|'CONFIRMING_MIC'|'RECORDING'|'LIMIT_PAUSED'|'SAVING'} */
+/** @type {'IDLE'|'CONFIRMING_MIC'|'RECORDING'|'PAUSED'|'LIMIT_PAUSED'|'SAVING'} */
 let state = 'IDLE';
 
 // Cached values from the last STATE_UPDATE (served to popup on GET_STATE)
@@ -107,9 +108,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       break;
 
     case 'STOP_RECORDING':
-      if (state === 'RECORDING' || state === 'LIMIT_PAUSED') {
+      if (state === 'RECORDING' || state === 'PAUSED' || state === 'LIMIT_PAUSED') {
         sendToOffscreen({ type: 'STOP_MEDIA', target: 'offscreen' });
         setState('SAVING');
+      }
+      break;
+
+    case 'PAUSE_RECORDING':
+      if (state === 'RECORDING') {
+        sendToOffscreen({ type: 'PAUSE_MEDIA', target: 'offscreen' });
+        setState('PAUSED');
+        sendToPopup({
+          type: 'STATE_UPDATE',
+          state: 'PAUSED',
+          elapsedSeconds: cachedElapsedSeconds,
+          totalBytes: cachedTotalBytes,
+        });
+      }
+      break;
+
+    case 'RESUME_RECORDING':
+      if (state === 'PAUSED') {
+        sendToOffscreen({ type: 'RESUME_MEDIA', target: 'offscreen' });
+        setState('RECORDING');
+        sendToPopup({
+          type: 'STATE_UPDATE',
+          state: 'RECORDING',
+          elapsedSeconds: cachedElapsedSeconds,
+          totalBytes: cachedTotalBytes,
+        });
       }
       break;
 
@@ -150,7 +177,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     case 'TOGGLE_POINTER':
       currentShowPointerOption = Boolean(message.on);
-      if ((state === 'RECORDING' || state === 'LIMIT_PAUSED') && recordingTabId !== null) {
+      if ((state === 'RECORDING' || state === 'PAUSED' || state === 'LIMIT_PAUSED') && recordingTabId !== null) {
         setPointerOverlay(recordingTabId, currentShowPointerOption).then((ok) => {
           if (!ok) {
             currentShowPointerOption = false;
@@ -171,7 +198,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (tabId !== recordingTabId) return;
-  if (state !== 'RECORDING' && state !== 'LIMIT_PAUSED') return;
+  if (state !== 'RECORDING' && state !== 'PAUSED' && state !== 'LIMIT_PAUSED') return;
 
   console.log('[SW] Recorded tab closed; interrupting recording.');
   sendToOffscreen({ type: 'TAB_CLOSED_INTERRUPT', target: 'offscreen' });
@@ -578,7 +605,7 @@ function sendMicDiagnostic(source, message, details) {
 
 function setState(newState) {
   state = newState;
-  const isActive = newState === 'RECORDING' || newState === 'LIMIT_PAUSED';
+  const isActive = newState === 'RECORDING' || newState === 'PAUSED' || newState === 'LIMIT_PAUSED';
   chrome.action.setBadgeText({ text: isActive ? '●' : '' });
   chrome.action.setBadgeBackgroundColor({ color: '#dc2626' });
   if (newState === 'IDLE') {
