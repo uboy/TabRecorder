@@ -7,12 +7,16 @@
     "tabs",
     "scripting",
     "storage",
-    "alarms",
-    "offscreen"
+    "alarms"
   ],
-  "host_permissions": ["<all_urls>"],
+  "host_permissions": [
+    "<all_urls>"
+  ],
   "background": {
-    "service_worker": "service-worker.js"
+    "scripts": [
+      "background.js"
+    ],
+    "type": "module"
   },
   "action": {
     "default_popup": "popup/popup.html",
@@ -23,5 +27,10 @@
   "icons": {
     "32": "icons/icon32.png",
     "128": "icons/icon128.png"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "tabrecorder@local.dev"
+    }
   }
 }
