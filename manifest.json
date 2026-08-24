@@ -3,7 +3,6 @@
   "name": "Tab Recorder",
   "version": "1.0.0",
   "permissions": [
-    "tabCapture",
     "tabs",
     "scripting",
     "storage",
