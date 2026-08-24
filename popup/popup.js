@@ -801,7 +801,7 @@ async function requestMicAccessFromDefaultDevice() {
   } catch (err) {
     console.warn('[popup] Forced mic request failed:', err);
     addDiag('popup', `getUserMedia(audio) failed: ${err?.name || 'Error'}: ${err?.message || 'unknown'}`);
-    window.alert('Microphone access was denied or unavailable. Please allow microphone access for this extension.');
+    document.getElementById('mic-warning').textContent = 'Microphone access denied. Please open this extension in a full tab to grant permission.'; document.getElementById('mic-warning').hidden = false;
     return {
       ok: false,
       deviceId: null,
@@ -816,15 +816,7 @@ function onDiagClearClick() {
   elDiagLog.textContent = '[diag] cleared';
 }
 
-function onGrantMicClick() {
-  addDiag('popup', 'Grant Mic clicked');
-  requestMicAccessFromDefaultDevice().then((result) => {
-    if (result.ok) {
-      addDiag('popup', 'Grant Mic succeeded');
-    }
-    refreshMicPermissionStatus();
-  });
-}
+function onGrantMicClick() { addDiag('popup', 'Grant Mic clicked'); if (window.innerWidth < 600) { chrome.tabs.create({ url: chrome.runtime.getURL('popup/popup.html') }); return; } requestMicAccessFromDefaultDevice().then((result) => { if (result.ok) { addDiag('popup', 'Grant Mic succeeded'); } refreshMicPermissionStatus(); }); }
 
 function addDiag(source, message, details) {
   if (!elDiagLog) return;
@@ -945,3 +937,4 @@ async function dbDelete(key) {
     tx.onerror    = (e) => reject(e.target.error);
   });
 }
+
