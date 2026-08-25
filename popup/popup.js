@@ -162,6 +162,22 @@ document.addEventListener('DOMContentLoaded', () => {
   refreshMicPermissionStatus();
   addDiag('popup', 'Initialized popup');
 
+  // Firefox mode: the recorder window broadcasts its state; popup acts as a
+  // remote controller (Stop/Cancel) while it stays open.
+  if (!chrome.tabCapture) {
+    chrome.runtime.onMessage.addListener((msg) => {
+      if (!msg || typeof msg.type !== 'string') return;
+      if (msg.type === 'REC_STATE') {
+        if (msg.state === 'ERROR') {
+          elErrorText.textContent = `Recording error: ${msg.error || 'Unknown error'}`;
+          renderState('ERROR');
+        } else {
+          renderState(msg.state, msg.elapsedSeconds || 0, msg.totalBytes || 0);
+        }
+      }
+    });
+  }
+
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
       refreshMicPermissionStatus();
@@ -288,6 +304,7 @@ async function onStartClick() {
     if (activeTabTitle) params.set('tabTitle', activeTabTitle);
     params.set('forceMic', String(forceMicEnabled));
     if (forcedMicDeviceId) params.set('micDeviceId', forcedMicDeviceId);
+    params.set('autostart', '1');
     try {
       await chrome.windows.create({
         url: chrome.runtime.getURL('recorder/recorder.html') + '?' + params.toString(),
@@ -324,6 +341,12 @@ async function onStartClick() {
 }
 
 async function onStopClick() {
+  // Firefox mode: recorder window owns the MediaRecorder; route via runtime message.
+  if (!chrome.tabCapture) {
+    sendMsg({ type: 'REC_STOP' });
+    renderState('SAVING');
+    return;
+  }
   // Open the save picker during the Stop click (user gesture active).
   // The handle is stored; the blob arrives asynchronously and is written then.
   const suggestedName = buildFilename(recordingTabTitle || activeTabTitle, new Date());
@@ -359,6 +382,12 @@ function onCancelRecordingClick() {
 
   fileHandle = null;
   partialBlobKey = null;
+  if (!chrome.tabCapture) {
+    sendMsg({ type: 'REC_CANCEL' });
+    addDiag('popup', 'REC_CANCEL sent');
+    renderState('IDLE');
+    return;
+  }
   sendMsg({ type: 'CANCEL_RECORDING' });
   addDiag('popup', 'CANCEL_RECORDING sent');
   renderState('IDLE');

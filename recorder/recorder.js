@@ -41,11 +41,13 @@ let timerInterval   = null;
 let startedAt       = 0;
 let mimeType        = '';
 let saving          = false;
+let discardRequested = false;
 
 const options = {
   tabTitle: '',
   forceMic: false,
   micDeviceId: null,
+  autostart: false,
 };
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
@@ -105,6 +107,40 @@ function pickMimeType() {
   return '';
 }
 
+/** Broadcast recorder state to the popup (best-effort). */
+function sendState(state, extra = {}) {
+  try {
+    chrome.runtime.sendMessage({
+      type: 'REC_STATE',
+      state,
+      elapsedSeconds: startedAt ? Math.floor((Date.now() - startedAt) / 1000) : 0,
+      totalBytes,
+      ...extra,
+    });
+  } catch {
+    // Popup may be closed — that is fine.
+  }
+}
+
+async function minimizeOwnWindow() {
+  try {
+    const win = await chrome.windows.getCurrent();
+    await chrome.windows.update(win.id, { state: 'minimized' });
+    diag('ui', 'window minimized during recording');
+  } catch (err) {
+    diag('ui', `minimize failed: ${err?.message || err}`);
+  }
+}
+
+async function restoreOwnWindow() {
+  try {
+    const win = await chrome.windows.getCurrent();
+    await chrome.windows.update(win.id, { state: 'normal' });
+  } catch {
+    // Best-effort.
+  }
+}
+
 // ─── Capture flow ─────────────────────────────────────────────────────────────
 
 async function onStartClick() {
@@ -120,6 +156,12 @@ async function onStartClick() {
     });
   } catch (err) {
     diag('capture', `getDisplayMedia failed: ${err.name}: ${err.message}`);
+    if (options.autostart) {
+      diag('capture', 'autostart rejected (no user activation in fresh window)');
+      setStatus('Click "Start recording" to begin.');
+      resetToIdle();
+      return;
+    }
     showError(`Capture cancelled or failed: ${err.name}: ${err.message}`);
     resetToIdle();
     return;
@@ -153,6 +195,7 @@ async function onStartClick() {
       diag('mic', `getUserMedia failed: ${err.name}: ${err.message}`);
       releaseStreams();
       showError(`Microphone request failed: ${err.name}: ${err.message}`);
+      sendState('ERROR', { error: `Microphone request failed: ${err.name}` });
       resetToIdle();
       return;
     }
@@ -196,15 +239,20 @@ async function onStartClick() {
 
   mediaRecorder.start(1000); // 1s timeslice → live size counter
   startedAt = Date.now();
+  discardRequested = false;
   panelIdle.hidden = true;
   panelRec.hidden = false;
   timerInterval = setInterval(tickTimer, 500);
-  setStatus('Recording… keep this window open.');
+  setStatus('Recording… you can use the popup to stop; this window is minimized.');
+  sendState('RECORDING');
   diag('rec', 'recording started');
+  await minimizeOwnWindow();
 }
 
 function tickTimer() {
-  elTimer.textContent = formatDuration((Date.now() - startedAt) / 1000);
+  const elapsed = (Date.now() - startedAt) / 1000;
+  elTimer.textContent = formatDuration(elapsed);
+  sendState('RECORDING');
 }
 
 function onSharingEnded() {
@@ -235,6 +283,7 @@ function stopRecording() {
 async function finalizeRecording() {
   if (saving) return;
   saving = true;
+  sendState('SAVING');
 
   const blob = new Blob(chunks, { type: mimeType || 'video/webm' });
   chunks = [];
@@ -245,6 +294,18 @@ async function finalizeRecording() {
   mixer = null;
   mediaRecorder = null;
 
+  if (discardRequested) {
+    diag('save', 'discard requested — blob dropped');
+    discardRequested = false;
+    saving = false;
+    setStatus('Recording cancelled, nothing saved.');
+    sendState('IDLE');
+    resetToIdle();
+    return;
+  }
+
+  // The save dialog needs a visible window.
+  await restoreOwnWindow();
   const savedName = await saveBlob(blob, suggestedName);
   if (savedName) {
     setStatus(`Saved: ${savedName} (${formatBytes(blob.size)})`);
@@ -252,6 +313,7 @@ async function finalizeRecording() {
     setStatus('Not saved.');
   }
   saving = false;
+  sendState('IDLE');
   resetToIdle();
 }
 
@@ -325,6 +387,41 @@ window.addEventListener('beforeunload', (e) => {
   }
 });
 
+// Popup remote control: Stop saves, Cancel discards.
+chrome.runtime.onMessage.addListener((msg) => {
+  if (!msg || typeof msg.type !== 'string') return;
+  if (msg.type === 'REC_STOP' && mediaRecorder && mediaRecorder.state === 'recording') {
+    diag('ctl', 'REC_STOP from popup');
+    stopRecording();
+  }
+  if (msg.type === 'REC_CANCEL') {
+    diag('ctl', 'REC_CANCEL from popup');
+    cancelRecording();
+  }
+});
+
+function cancelRecording() {
+  discardRequested = true;
+  clearInterval(timerInterval);
+  timerInterval = null;
+  panelRec.hidden = true;
+  setStatus('Cancelling…');
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    try {
+      mediaRecorder.stop(); // onstop -> finalize (discard path)
+      return;
+    } catch (err) {
+      diag('ctl', `stop() threw on cancel: ${err?.message || err}`);
+    }
+  }
+  releaseStreams();
+  saving = false;
+  discardRequested = false;
+  setStatus('Cancelled.');
+  sendState('IDLE');
+  resetToIdle();
+}
+
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -332,6 +429,7 @@ document.addEventListener('DOMContentLoaded', () => {
   options.tabTitle    = params.get('tabTitle') || '';
   options.forceMic    = params.get('forceMic') === 'true';
   options.micDeviceId = params.get('micDeviceId') || null;
+  options.autostart   = params.get('autostart') === '1';
 
   elTarget.textContent = options.tabTitle
     ? `Recording target: ${options.tabTitle}`
@@ -354,8 +452,15 @@ document.addEventListener('DOMContentLoaded', () => {
   setStatus(
     'Ready. Pick "Browser Tab" in the sharing dialog; enable its audio checkbox for sound.'
   );
-  diag('env', `initialized; forceMic=${options.forceMic}; micDeviceId=${options.micDeviceId || 'none'}`);
+  diag('env', `initialized; forceMic=${options.forceMic}; autostart=${options.autostart}`);
 
   btnStart.addEventListener('click', onStartClick);
   btnStop.addEventListener('click', onStopClick);
+
+  if (options.autostart) {
+    // Attempt to jump straight into the picker. A freshly opened window has
+    // no user activation, so Firefox may reject the call — then we just fall
+    // back to the manual button (already wired above).
+    onStartClick();
+  }
 });
