@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Tab Recorder",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "permissions": [
     "tabs",
     "scripting",
@@ -29,7 +29,10 @@
   },
   "browser_specific_settings": {
     "gecko": {
-      "id": "tabrecorder@local.dev"
+      "id": "tabrecorder@local.dev",
+      "data_collection_permissions": {
+        "required": ["none"]
+      }
     }
   }
 }

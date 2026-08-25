@@ -876,7 +876,7 @@ function sendToSW(message) {
   handleOffscreenMessage(message);
 }
 
-function sendMicDiagnostic(message, details) {
+function sendOffscreenMicDiagnostic(message, details) {
   sendToSW({
     type: 'MIC_DIAGNOSTIC',
     source: 'offscreen',
@@ -1049,7 +1049,7 @@ function finalizeRecording({ discard = false } = {}) {
 
 async function handleStartMedia({ streamId, includeMic, forceMic, micDeviceId, suggestedName: name }) {
   console.log('[offscreen] START_MEDIA received. streamId:', streamId, 'includeMic:', includeMic, 'forceMic:', forceMic);
-  sendMicDiagnostic('START_MEDIA received', {
+  sendOffscreenMicDiagnostic('START_MEDIA received', {
     includeMic: Boolean(includeMic),
     forceMic: Boolean(forceMic),
     micDeviceId: micDeviceId || null,
@@ -1109,7 +1109,7 @@ async function handleStartMedia({ streamId, includeMic, forceMic, micDeviceId, s
     } else {
       micConstraints.deviceId = { ideal: 'default' };
     }
-    sendMicDiagnostic('Requesting microphone stream', { micConstraints });
+    sendOffscreenMicDiagnostic('Requesting microphone stream', { micConstraints });
 
     try {
       micStream = await navigator.mediaDevices.getUserMedia({
@@ -1120,7 +1120,7 @@ async function handleStartMedia({ streamId, includeMic, forceMic, micDeviceId, s
 
       const micTrack = micStream.getAudioTracks()[0] || null;
       if (micTrack) {
-        sendMicDiagnostic('Mic stream acquired', {
+        sendOffscreenMicDiagnostic('Mic stream acquired', {
           label: micTrack.label || '',
           enabled: micTrack.enabled,
           muted: micTrack.muted,
@@ -1130,31 +1130,31 @@ async function handleStartMedia({ streamId, includeMic, forceMic, micDeviceId, s
         });
 
         micTrack.onmute = () => {
-          sendMicDiagnostic('Mic track muted', {
+          sendOffscreenMicDiagnostic('Mic track muted', {
             enabled: micTrack.enabled,
             muted: micTrack.muted,
             readyState: micTrack.readyState,
           });
         };
         micTrack.onunmute = () => {
-          sendMicDiagnostic('Mic track unmuted', {
+          sendOffscreenMicDiagnostic('Mic track unmuted', {
             enabled: micTrack.enabled,
             muted: micTrack.muted,
             readyState: micTrack.readyState,
           });
         };
         micTrack.onended = () => {
-          sendMicDiagnostic('Mic track ended', {
+          sendOffscreenMicDiagnostic('Mic track ended', {
             enabled: micTrack.enabled,
             muted: micTrack.muted,
             readyState: micTrack.readyState,
           });
         };
       } else {
-        sendMicDiagnostic('Mic stream acquired but audio track missing');
+        sendOffscreenMicDiagnostic('Mic stream acquired but audio track missing');
       }
     } catch (err) {
-      sendMicDiagnostic('Microphone getUserMedia failed', {
+      sendOffscreenMicDiagnostic('Microphone getUserMedia failed', {
         errorName: err.name || 'Error',
         errorMessage: err.message || 'unknown',
       });
@@ -1172,7 +1172,7 @@ async function handleStartMedia({ streamId, includeMic, forceMic, micDeviceId, s
       micStream = null;
     }
   } else {
-    sendMicDiagnostic('Mic capture disabled for this session');
+    sendOffscreenMicDiagnostic('Mic capture disabled for this session');
   }
 
   // 3. Determine codec
@@ -1200,15 +1200,15 @@ async function handleStartMedia({ streamId, includeMic, forceMic, micDeviceId, s
   if (micStream) {
     const audioContext = new AudioContext();
     await audioContext.resume(); // required — offscreen has no user gesture
-    sendMicDiagnostic('AudioContext resumed for mixing', { state: audioContext.state });
+    sendOffscreenMicDiagnostic('AudioContext resumed for mixing', { state: audioContext.state });
     mixer = new AudioMixer(audioContext);
     combinedStream = mixer.mix(tabStream, micStream);
   } else {
     combinedStream = tabStream; // direct pass-through, no AudioContext needed
-    sendMicDiagnostic('Using tabStream directly (no mic mixing)');
+    sendOffscreenMicDiagnostic('Using tabStream directly (no mic mixing)');
   }
   console.log('[offscreen] Combined stream tracks:', combinedStream.getTracks().length);
-  sendMicDiagnostic('Combined stream ready', {
+  sendOffscreenMicDiagnostic('Combined stream ready', {
     totalTracks: combinedStream.getTracks().length,
     audioTracks: combinedStream.getAudioTracks().length,
     videoTracks: combinedStream.getVideoTracks().length,
@@ -1233,7 +1233,7 @@ async function handleStartMedia({ streamId, includeMic, forceMic, micDeviceId, s
   // 7. Start recording with 1-second timeslice
   recorder.start(1000);
   console.log('[offscreen] MediaRecorder started. state:', recorder.state);
-  sendMicDiagnostic('MediaRecorder started', {
+  sendOffscreenMicDiagnostic('MediaRecorder started', {
     recorderState: recorder.state,
     mimeType,
   });
