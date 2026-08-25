@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Tab Recorder — Firefox</title>
+  <link rel="stylesheet" href="../popup/popup.css" />
+  <style>
+    .recorder-shell { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+    .recorder-target { font-weight: 600; font-size: 13px; word-break: break-all; }
+    .recorder-status { font-size: 12px; color: #667; min-height: 16px; }
+    #btn-rec-start { width: 100%; padding: 10px; font-size: 14px; }
+  </style>
+</head>
+<body data-state="IDLE">
+  <div class="recorder-shell">
+    <div id="rec-target" class="recorder-target">Tab Recorder (Firefox)</div>
+    <div id="rec-status" class="recorder-status">Loading options…</div>
+    <button id="btn-rec-start" class="btn btn-primary" disabled>Start recording</button>
+    <div id="rec-error" class="error-text" hidden></div>
+    <pre id="rec-diag" style="font-size:11px; max-height:180px; overflow:auto;"></pre>
+  </div>
+  <script src="recorder.js"></script>
+</body>
+</html>

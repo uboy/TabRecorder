@@ -280,6 +280,30 @@ async function onStartClick() {
     addDiag('popup', 'Force Mic disabled; microphone will be optional');
   }
 
+  // Firefox has no tabCapture API: route to the standalone recorder window,
+  // which captures via getDisplayMedia inside its own user gesture.
+  if (!chrome.tabCapture) {
+    addDiag('popup', 'tabCapture unavailable (Firefox), opening recorder window');
+    const params = new URLSearchParams();
+    if (activeTabTitle) params.set('tabTitle', activeTabTitle);
+    params.set('forceMic', String(forceMicEnabled));
+    if (forcedMicDeviceId) params.set('micDeviceId', forcedMicDeviceId);
+    try {
+      await chrome.windows.create({
+        url: chrome.runtime.getURL('recorder/recorder.html') + '?' + params.toString(),
+        type: 'popup',
+        width: 440,
+        height: 600,
+      });
+      window.close();
+    } catch (err) {
+      addDiag('popup', `Failed to open recorder window: ${err?.message || err}`);
+      elErrorText.textContent = `Cannot open recorder window: ${err?.message || err}`;
+      renderState('ERROR');
+    }
+    return;
+  }
+
   // Save the recording tab title so Stop can use it for the filename.
   recordingTabTitle = activeTabTitle;
   sendMsg({
