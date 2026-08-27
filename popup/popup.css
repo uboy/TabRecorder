@@ -219,6 +219,70 @@ body[data-state="ERROR"]          .section-error          { display: block; }
   border-color: #3c4168;
 }
 
+.schedule-panel {
+  margin-bottom: 10px;
+  padding: 8px;
+  border-radius: 6px;
+  background: #14152b;
+  border: 1px solid #2e2e4e;
+}
+
+.schedule-title {
+  margin-bottom: 6px;
+  font-size: 11px;
+  color: #a0a0c8;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.schedule-input-row {
+  margin-top: 8px;
+}
+
+.field-label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 11px;
+  color: #aeb4de;
+}
+
+.field-control {
+  width: 100%;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid #41466f;
+  border-radius: 5px;
+  background: #101024;
+  color: #e0e6ff;
+  font: inherit;
+}
+
+.field-control-small {
+  width: 64px;
+}
+
+.duration-inputs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.field-suffix {
+  font-size: 12px;
+  color: #9090b0;
+}
+
+.schedule-preview,
+.schedule-status {
+  margin-top: 8px;
+  padding: 6px 8px;
+  border-radius: 5px;
+  background: #1f2238;
+  border: 1px solid #343a63;
+  color: #c8d0ff;
+  font-size: 11px;
+}
+
 /* Full-width button when alone */
 .state-section > .btn {
   width: 100%;

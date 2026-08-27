@@ -13,6 +13,8 @@
 
 'use strict';
 
+const RecordingSchedule = globalThis.RecordingSchedule;
+
 // ─── Module-level state ───────────────────────────────────────────────────────
 
 let port              = null;   // long-lived runtime port to SW
@@ -28,7 +30,12 @@ let forceMicEnabled   = false;  // include microphone even without mic confirmat
 let pointerEnabled    = false;  // draw pointer overlay in recorded tab
 let interactionLockEnabled = false; // block interaction with recorded tab
 let forcedMicDeviceId = null;   // concrete input device selected during forced mic access check
+let autoStopOption    = RecordingSchedule.createDisabledSchedule();
 const MAX_DIAG_LINES  = 120;
+const DB_VERSION = 2;
+const BLOB_STORE = 'tab-recorder-blobs';
+const META_STORE = 'tab-recorder-meta';
+const SAVE_HANDLE_KEY = 'pending-save-handle';
 
 // ─── DOM references ───────────────────────────────────────────────────────────
 
@@ -47,6 +54,16 @@ const elPointerWarn  = document.getElementById('pointer-warning');
 const elInteractionLockWarn = document.getElementById('interaction-lock-warning');
 const elMicPermStatus = document.getElementById('mic-perm-status');
 const elDiagLog      = document.getElementById('diag-log');
+const elAutoStopMode = document.getElementById('auto-stop-mode');
+const elAutoStopAtTimeRow = document.getElementById('auto-stop-at-time-row');
+const elAutoStopAfterRow = document.getElementById('auto-stop-after-row');
+const elAutoStopTime = document.getElementById('auto-stop-time');
+const elAutoStopHours = document.getElementById('auto-stop-hours');
+const elAutoStopMinutes = document.getElementById('auto-stop-minutes');
+const elAutoStopPreview = document.getElementById('auto-stop-preview');
+const elAutoStopStatusRecording = document.getElementById('auto-stop-status-recording');
+const elAutoStopStatusPaused = document.getElementById('auto-stop-status-paused');
+const elAutoStopStatusLimit = document.getElementById('auto-stop-status-limit');
 
 const btnStart       = document.getElementById('btn-start');
 const btnPause       = document.getElementById('btn-pause');
@@ -96,35 +113,57 @@ document.addEventListener('DOMContentLoaded', () => {
   chrome.runtime.sendMessage({ type: 'GET_STATE' }, (response) => {
     if (chrome.runtime.lastError) return; // SW may not yet be ready
     if (response) {
+      (async () => {
       // If recording is ongoing, show the recording tab title, not the current tab
-      if (response.tabTitle && response.state !== 'IDLE') {
-        elTabTitle.textContent = truncate(response.tabTitle, 30);
-        elTabTitle.title       = response.tabTitle;
-      }
+        if (response.tabTitle && response.state !== 'IDLE') {
+          elTabTitle.textContent = truncate(response.tabTitle, 30);
+          elTabTitle.title       = response.tabTitle;
+        }
 
-      // Stash the recording tab title for use in filenames.
-      if (response.tabTitle) recordingTabTitle = response.tabTitle;
-      if (typeof response.forceMic === 'boolean') {
-        forceMicEnabled = response.forceMic;
-      }
-      if (typeof response.showPointer === 'boolean') {
-        pointerEnabled = response.showPointer;
-      }
-      if (typeof response.lockInteractions === 'boolean') {
-        interactionLockEnabled = response.lockInteractions;
-      }
-      updateForceMicButton();
-      updatePointerButtons();
-      updateInteractionLockButtons();
-      updateInteractionLockIndicators();
+        // Stash the recording tab title for use in filenames.
+        if (response.tabTitle) recordingTabTitle = response.tabTitle;
+        if (typeof response.forceMic === 'boolean') {
+          forceMicEnabled = response.forceMic;
+        }
+        if (typeof response.showPointer === 'boolean') {
+          pointerEnabled = response.showPointer;
+        }
+        if (typeof response.lockInteractions === 'boolean') {
+          interactionLockEnabled = response.lockInteractions;
+        }
+        if (response.autoStop) {
+          autoStopOption = RecordingSchedule.cloneSchedule(response.autoStop);
+        }
+        updateForceMicButton();
+        updatePointerButtons();
+        updateInteractionLockButtons();
+        updateInteractionLockIndicators();
+        syncAutoStopControls(autoStopOption);
+        refreshAutoStopPreview();
+        updateAutoStopStatus();
 
-      // A blob finished while popup was closed — recover via save dialog.
-      if (response.pendingBlobKey) {
-        handleBlobReady(response.pendingBlobKey, response.pendingSuggestedName);
-        return;
-      }
+        if ((response.pendingBlobKey || response.state !== 'IDLE') && !fileHandle) {
+          await restorePersistedSaveHandle();
+        }
 
-      renderState(response.state, response.elapsedSeconds, response.totalBytes);
+        // A blob finished while popup was closed — recover using the restored handle if available.
+        if (response.pendingBlobKey && !response.recoveryInProgress) {
+          handleBlobReady(response.pendingBlobKey, response.pendingSuggestedName);
+          return;
+        }
+        if (response.pendingBlobKey && response.recoveryInProgress) {
+          addDiag('popup', 'Emergency recovery save is already in progress', {
+            pendingBlobKey: response.pendingBlobKey,
+            suggestedName: response.pendingSuggestedName,
+          });
+        }
+
+        renderState(response.state, response.elapsedSeconds, response.totalBytes, response.autoStop);
+      })().catch((err) => {
+        console.warn('[popup] Failed to restore popup state:', err);
+        addDiag('popup', `State restore failed: ${err?.name || 'Error'}: ${err?.message || 'unknown'}`);
+        renderState(response.state, response.elapsedSeconds, response.totalBytes, response.autoStop);
+      });
     }
   });
 
@@ -154,11 +193,18 @@ document.addEventListener('DOMContentLoaded', () => {
   btnSavePartial.addEventListener('click', onSavePartialClick);
   btnDiscard.addEventListener('click',     onDiscardClick);
   btnDiagClear.addEventListener('click',   onDiagClearClick);
+  elAutoStopMode.addEventListener('change', onAutoStopControlsChange);
+  elAutoStopTime.addEventListener('change', onAutoStopControlsChange);
+  elAutoStopHours.addEventListener('input', onAutoStopControlsChange);
+  elAutoStopMinutes.addEventListener('input', onAutoStopControlsChange);
 
   updateForceMicButton();
   updatePointerButtons();
   updateInteractionLockButtons();
   updateInteractionLockIndicators();
+  syncAutoStopControls(autoStopOption);
+  refreshAutoStopPreview();
+  updateAutoStopStatus();
   refreshMicPermissionStatus();
   addDiag('popup', 'Initialized popup');
 
@@ -184,7 +230,7 @@ window.addEventListener('beforeunload', (e) => {
 function handlePortMessage(message) {
   switch (message.type) {
     case 'STATE_UPDATE':
-      renderState(message.state, message.elapsedSeconds, message.totalBytes);
+      renderState(message.state, message.elapsedSeconds, message.totalBytes, message.autoStop);
       break;
 
     case 'CONFIRM_MIC':
@@ -192,7 +238,7 @@ function handlePortMessage(message) {
       break;
 
     case 'LIMIT_REACHED':
-      renderState('LIMIT_PAUSED');
+      renderState('LIMIT_PAUSED', message.elapsedSeconds, message.totalBytes, message.autoStop);
       break;
 
     case 'BLOB_READY':
@@ -234,6 +280,14 @@ function handlePortMessage(message) {
       addDiag(message.source || 'mic', message.message || 'diagnostic', message.details);
       break;
 
+    case 'DIAGNOSTIC':
+      addDiag(
+        message.source || 'runtime',
+        `${message.level ? `${String(message.level).toUpperCase()}: ` : ''}${message.message || 'diagnostic'}`,
+        message.details
+      );
+      break;
+
     case 'RECORDING_ERROR':
       elErrorText.textContent =
         `Recording error: ${message.error || 'Unknown error'}`;
@@ -251,6 +305,7 @@ function handlePortMessage(message) {
 async function onStartClick() {
   if (!activeTabId) {
     console.error('[popup] No active tab ID');
+    addDiag('popup', 'Start blocked: active tab ID is unavailable');
     return;
   }
 
@@ -267,6 +322,7 @@ async function onStartClick() {
     const micResult = await requestMicAccessFromDefaultDevice();
     const micReady = micResult.ok;
     if (!micReady) {
+      forcedMicDeviceId = null;
       addDiag('popup', 'Microphone preflight failed; start aborted');
       refreshMicPermissionStatus();
       return;
@@ -280,6 +336,30 @@ async function onStartClick() {
     addDiag('popup', 'Force Mic disabled; microphone will be optional');
   }
 
+  const autoStopResult = readAutoStopOptionFromInputs();
+  if (!autoStopResult.ok) {
+    window.alert(autoStopResult.message);
+    return;
+  }
+
+  autoStopOption = RecordingSchedule.cloneSchedule(autoStopResult.schedule);
+  syncAutoStopControls(autoStopOption);
+  refreshAutoStopPreview();
+  updateAutoStopStatus();
+
+  fileHandle = null;
+  await clearPersistedSaveHandle();
+  if (RecordingSchedule.isScheduleEnabled(autoStopOption)) {
+    const pickedHandle = await pickSaveFileHandle(
+      buildFilename(activeTabTitle, new Date())
+    );
+    if (!pickedHandle) {
+      return;
+    }
+    fileHandle = pickedHandle;
+    await persistSaveHandle(fileHandle);
+  }
+
   // Save the recording tab title so Stop can use it for the filename.
   recordingTabTitle = activeTabTitle;
   sendMsg({
@@ -290,40 +370,46 @@ async function onStartClick() {
     showPointer: pointerEnabled,
     lockInteractions: interactionLockEnabled,
     micDeviceId: forcedMicDeviceId,
+    autoStop: autoStopOption,
   });
   addDiag('popup', 'START_RECORDING sent', {
     forceMicEnabled,
     pointerEnabled,
     interactionLockEnabled,
     micDeviceId: forcedMicDeviceId || null,
+    autoStopMode: autoStopOption.mode,
   });
 }
 
 async function onStopClick() {
-  // Open the save picker during the Stop click (user gesture active).
-  // The handle is stored; the blob arrives asynchronously and is written then.
-  const suggestedName = buildFilename(recordingTabTitle || activeTabTitle, new Date());
-  try {
-    fileHandle = await window.showSaveFilePicker({
-      suggestedName,
-      types: [{ description: 'WebM Video', accept: { 'video/webm': ['.webm'] } }],
-    });
-  } catch (err) {
-    if (err.name === 'AbortError') return; // user cancelled — keep recording
-    console.error('[popup] showSaveFilePicker error:', err);
-    return;
+  if (!fileHandle) {
+    const pickedHandle = await pickSaveFileHandle(
+      buildFilename(recordingTabTitle || activeTabTitle, new Date())
+    );
+    if (!pickedHandle) {
+      return;
+    }
+    fileHandle = pickedHandle;
+    await persistSaveHandle(fileHandle);
   }
   sendMsg({ type: 'STOP_RECORDING' });
+  addDiag('popup', 'STOP_RECORDING sent', {
+    reusedExistingHandle: Boolean(fileHandle),
+  });
   renderState('SAVING');
 }
 
 function onPauseClick() {
+  autoStopOption = RecordingSchedule.pauseActiveSchedule(autoStopOption, Date.now());
   sendMsg({ type: 'PAUSE_RECORDING' });
+  addDiag('popup', 'PAUSE_RECORDING sent');
   renderState('PAUSED');
 }
 
 function onResumeClick() {
+  autoStopOption = RecordingSchedule.resumeActiveSchedule(autoStopOption, Date.now());
   sendMsg({ type: 'RESUME_RECORDING' });
+  addDiag('popup', 'RESUME_RECORDING sent');
   renderState('RECORDING');
 }
 
@@ -334,6 +420,7 @@ function onCancelRecordingClick() {
   }
 
   fileHandle = null;
+  clearPersistedSaveHandle().catch(() => {});
   partialBlobKey = null;
   sendMsg({ type: 'CANCEL_RECORDING' });
   addDiag('popup', 'CANCEL_RECORDING sent');
@@ -344,6 +431,7 @@ function onMonitorClick() {
   monitorOn = !monitorOn;
   updateMonitorButton();
   sendMsg({ type: 'TOGGLE_MONITOR', on: monitorOn });
+  addDiag('popup', `Speakers toggled: ${monitorOn ? 'ON' : 'OFF'}`);
 }
 
 function onForceMicClick() {
@@ -386,27 +474,32 @@ function onInteractionLockClick() {
 }
 
 function onContinueClick() {
+  autoStopOption = RecordingSchedule.resumeActiveSchedule(autoStopOption, Date.now());
   sendMsg({ type: 'CONFIRM_CONTINUE' });
+  addDiag('popup', 'CONFIRM_CONTINUE sent');
   renderState('RECORDING');
 }
 
 async function onStopLimitClick() {
-  const suggestedName = buildFilename(recordingTabTitle || activeTabTitle, new Date());
-  try {
-    fileHandle = await window.showSaveFilePicker({
-      suggestedName,
-      types: [{ description: 'WebM Video', accept: { 'video/webm': ['.webm'] } }],
-    });
-  } catch (err) {
-    if (err.name === 'AbortError') return;
-    console.error('[popup] showSaveFilePicker error:', err);
-    return;
+  if (!fileHandle) {
+    const pickedHandle = await pickSaveFileHandle(
+      buildFilename(recordingTabTitle || activeTabTitle, new Date())
+    );
+    if (!pickedHandle) {
+      return;
+    }
+    fileHandle = pickedHandle;
+    await persistSaveHandle(fileHandle);
   }
   sendMsg({ type: 'CONFIRM_STOP_AT_LIMIT' });
+  addDiag('popup', 'CONFIRM_STOP_AT_LIMIT sent');
   renderState('SAVING');
 }
 
 async function onSavePartialClick() {
+  addDiag('popup', 'Save partial requested', {
+    hasPendingBlobKey: Boolean(partialBlobKey),
+  });
   // If we have a pre-opened handle, try to use it; otherwise open a new picker.
   if (!fileHandle) {
     try {
@@ -424,6 +517,7 @@ async function onSavePartialClick() {
       console.error('[popup] showSaveFilePicker (partial) error:', err);
       return;
     }
+    await persistSaveHandle(fileHandle);
   }
 
   if (partialBlobKey) {
@@ -436,6 +530,9 @@ async function onSavePartialClick() {
 }
 
 async function onDiscardClick() {
+  addDiag('popup', 'Discard requested', {
+    hasPendingBlobKey: Boolean(partialBlobKey),
+  });
   // Clean up any stored IndexedDB entry, then return to IDLE
   if (partialBlobKey) {
     try {
@@ -444,8 +541,10 @@ async function onDiscardClick() {
       // Best-effort cleanup
     }
     partialBlobKey = null;
+    sendMsg({ type: 'SAVE_FLOW_FINISHED' });
   }
   fileHandle = null;
+  await clearPersistedSaveHandle();
   renderState('IDLE');
 }
 
@@ -453,6 +552,11 @@ async function onDiscardClick() {
 
 async function handleBlobReady(blobKey, suggestedName) {
   renderState('SAVING');
+  addDiag('popup', 'BLOB_READY handling started', {
+    blobKey,
+    suggestedName,
+    hasFileHandle: Boolean(fileHandle),
+  });
 
   let blob;
   try {
@@ -460,6 +564,11 @@ async function handleBlobReady(blobKey, suggestedName) {
     if (!blob) throw new Error('Blob not found in IndexedDB');
   } catch (err) {
     console.error('[popup] Failed to read blob from IndexedDB:', err);
+    addDiag('popup', 'Failed to read blob from IndexedDB', {
+      blobKey,
+      errorName: err?.name || 'Error',
+      errorMessage: err?.message || 'unknown',
+    });
     showRetryPrompt(blobKey, suggestedName);
     return;
   }
@@ -472,6 +581,12 @@ async function handleBlobReady(blobKey, suggestedName) {
 
   if (!success) {
     // fileHandle is gone or write failed — show retry prompt
+    fileHandle = null;
+    await clearPersistedSaveHandle();
+    addDiag('popup', 'Primary save attempt failed; prompting retry', {
+      blobKey,
+      suggestedName,
+    });
     showRetryPrompt(blobKey, suggestedName);
     return;
   }
@@ -483,7 +598,14 @@ async function handleBlobReady(blobKey, suggestedName) {
     console.warn('[popup] Failed to delete IndexedDB entry:', err);
   }
 
+  await clearPersistedSaveHandle();
+  sendMsg({ type: 'SAVE_FLOW_FINISHED' });
   fileHandle = null;
+  partialBlobKey = null;
+  addDiag('popup', 'Recording saved successfully', {
+    blobKey,
+    suggestedName,
+  });
   renderState('IDLE');
 }
 
@@ -499,6 +621,10 @@ async function writeToHandle(handle, blob) {
     return true;
   } catch (err) {
     console.error('[popup] FileSystemFileHandle write failed:', err);
+    addDiag('popup', 'FileSystemFileHandle write failed', {
+      errorName: err?.name || 'Error',
+      errorMessage: err?.message || 'unknown',
+    });
     return false;
   }
 }
@@ -508,9 +634,17 @@ async function writeToHandle(handle, blob) {
  * Lets the user pick a new location or give up.
  */
 async function showRetryPrompt(blobKey, suggestedName) {
+  addDiag('popup', 'Retry save prompt opened', {
+    blobKey,
+    suggestedName,
+  });
   const retry = window.confirm(
     'The recording was not saved. Would you like to try saving again?'
   );
+  addDiag('popup', `Retry save choice: ${retry ? 'retry' : 'discard'}`, {
+    blobKey,
+    suggestedName,
+  });
 
   if (retry) {
     try {
@@ -530,6 +664,12 @@ async function showRetryPrompt(blobKey, suggestedName) {
         if (!blob) throw new Error('Blob not found');
       } catch (err) {
         console.error('[popup] Failed to re-read blob:', err);
+        addDiag('popup', 'Failed to re-read blob during retry', {
+          blobKey,
+          errorName: err?.name || 'Error',
+          errorMessage: err?.message || 'unknown',
+        });
+        sendMsg({ type: 'SAVE_FLOW_FINISHED' });
         renderState('IDLE');
         return;
       }
@@ -537,26 +677,66 @@ async function showRetryPrompt(blobKey, suggestedName) {
       const success = await writeToHandle(newHandle, blob);
       if (success) {
         await dbDelete(blobKey).catch(() => {});
+        await clearPersistedSaveHandle();
+        sendMsg({ type: 'SAVE_FLOW_FINISHED' });
         fileHandle = null;
+        partialBlobKey = null;
+        addDiag('popup', 'Retry save succeeded', {
+          blobKey,
+          suggestedName,
+        });
         renderState('IDLE');
       } else {
         alert('Recording was not saved.');
         await dbDelete(blobKey).catch(() => {});
+        await clearPersistedSaveHandle();
+        sendMsg({ type: 'SAVE_FLOW_FINISHED' });
+        addDiag('popup', 'Retry save failed; recording discarded', {
+          blobKey,
+          suggestedName,
+        });
         renderState('IDLE');
       }
     } catch (err) {
       if (err.name !== 'AbortError') {
         console.error('[popup] Retry save picker error:', err);
+        await dbDelete(blobKey).catch(() => {});
+        await clearPersistedSaveHandle();
+        sendMsg({ type: 'SAVE_FLOW_FINISHED' });
+        addDiag('popup', 'Retry save picker failed; recording discarded', {
+          blobKey,
+          suggestedName,
+          errorName: err?.name || 'Error',
+          errorMessage: err?.message || 'unknown',
+        });
+        renderState('IDLE');
+        return;
       }
-      // User cancelled picker — delete blob and return to IDLE
-      await dbDelete(blobKey).catch(() => {});
-      renderState('IDLE');
+      // User cancelled retry save — keep the blob so they can save it later.
+      fileHandle = null;
+      partialBlobKey = blobKey;
+      await clearPersistedSaveHandle();
+      elErrorText.textContent =
+        'Save was cancelled. You can try saving the recording again or discard it.';
+      sendMsg({ type: 'SAVE_FLOW_DEFERRED' });
+      addDiag('popup', 'Retry save picker was cancelled; waiting for manual decision', {
+        blobKey,
+        suggestedName,
+      });
+      renderState('ERROR');
     }
   } else {
     // User declined retry
     window.alert('The recording was not saved.');
     await dbDelete(blobKey).catch(() => {});
+    await clearPersistedSaveHandle();
+    sendMsg({ type: 'SAVE_FLOW_FINISHED' });
     fileHandle = null;
+    partialBlobKey = null;
+    addDiag('popup', 'Retry was declined; recording discarded', {
+      blobKey,
+      suggestedName,
+    });
     renderState('IDLE');
   }
 }
@@ -569,11 +749,22 @@ async function showRetryPrompt(blobKey, suggestedName) {
  * @param {string} state
  * @param {number} [elapsedSeconds]
  * @param {number} [totalBytes]
+ * @param {object} [activeAutoStop]
  */
-function renderState(state, elapsedSeconds = 0, totalBytes = 0) {
+function renderState(state, elapsedSeconds = 0, totalBytes = 0, activeAutoStop = undefined) {
   const wasActiveRecording = currentState === 'RECORDING' || currentState === 'PAUSED';
   currentState = state;
   document.body.dataset.state = state;
+
+  if (state === 'IDLE') {
+    fileHandle = null;
+    partialBlobKey = null;
+  }
+
+  if (activeAutoStop) {
+    autoStopOption = RecordingSchedule.cloneSchedule(activeAutoStop);
+    syncAutoStopControls(autoStopOption);
+  }
 
   // Reset monitor toggle when a fresh recording begins.
   if (state === 'RECORDING' && !wasActiveRecording) {
@@ -593,12 +784,14 @@ function renderState(state, elapsedSeconds = 0, totalBytes = 0) {
   if (elPausedSizeDisplay) {
     elPausedSizeDisplay.textContent = formatBytes(totalBytes);
   }
+  refreshAutoStopPreview();
+  updateAutoStopStatus();
   updateInteractionLockIndicators();
 }
 
 function updateMonitorButton() {
   if (!btnMonitor) return;
-  btnMonitor.textContent = monitorOn ? 'Tab audio: On' : 'Tab audio: Off';
+  btnMonitor.textContent = monitorOn ? 'Speakers: On' : 'Speakers: Off';
   btnMonitor.classList.toggle('btn-monitor-on',  monitorOn);
   btnMonitor.classList.toggle('btn-monitor-off', !monitorOn);
 }
@@ -666,9 +859,125 @@ function updateInteractionLockIndicators() {
   }
 }
 
+function onAutoStopControlsChange() {
+  refreshAutoStopVisibility();
+  refreshAutoStopPreview();
+}
+
+function syncAutoStopControls(schedule) {
+  const normalized = RecordingSchedule.cloneSchedule(schedule);
+  const mode = normalized.mode || RecordingSchedule.MODE_NONE;
+
+  elAutoStopMode.value = mode;
+
+  if (mode === RecordingSchedule.MODE_AT_TIME) {
+    elAutoStopTime.value = normalized.timeValue || '';
+  } else if (!elAutoStopTime.value) {
+    elAutoStopTime.value = '15:00';
+  }
+
+  if (mode === RecordingSchedule.MODE_AFTER_INTERVAL) {
+    elAutoStopHours.value = String(normalized.hours);
+    elAutoStopMinutes.value = String(normalized.minutes);
+  } else {
+    if (!elAutoStopHours.value) elAutoStopHours.value = '0';
+    if (!elAutoStopMinutes.value) elAutoStopMinutes.value = '30';
+  }
+
+  refreshAutoStopVisibility();
+}
+
+function refreshAutoStopVisibility() {
+  const mode = elAutoStopMode.value;
+  elAutoStopAtTimeRow.hidden = mode !== RecordingSchedule.MODE_AT_TIME;
+  elAutoStopAfterRow.hidden = mode !== RecordingSchedule.MODE_AFTER_INTERVAL;
+}
+
+function readAutoStopOptionFromInputs() {
+  try {
+    const mode = elAutoStopMode.value;
+    if (mode === RecordingSchedule.MODE_NONE) {
+      return { ok: true, schedule: RecordingSchedule.createDisabledSchedule() };
+    }
+
+    if (mode === RecordingSchedule.MODE_AT_TIME) {
+      return {
+        ok: true,
+        schedule: RecordingSchedule.buildStopAtTimeOption(elAutoStopTime.value),
+      };
+    }
+
+    if (mode === RecordingSchedule.MODE_AFTER_INTERVAL) {
+      return {
+        ok: true,
+        schedule: RecordingSchedule.buildStopAfterIntervalOption(
+          elAutoStopHours.value,
+          elAutoStopMinutes.value
+        ),
+      };
+    }
+
+    return { ok: true, schedule: RecordingSchedule.createDisabledSchedule() };
+  } catch (err) {
+    return {
+      ok: false,
+      message: err.message || 'Invalid auto-stop configuration.',
+    };
+  }
+}
+
+function refreshAutoStopPreview() {
+  const result = readAutoStopOptionFromInputs();
+  if (!result.ok) {
+    elAutoStopPreview.textContent = result.message;
+    return;
+  }
+
+  const preview = RecordingSchedule.describeSchedule(result.schedule, {
+    state: 'IDLE',
+    now: Date.now(),
+  });
+  elAutoStopPreview.textContent = preview || 'Auto-stop: Off';
+}
+
+function updateAutoStopStatus() {
+  const text = RecordingSchedule.describeSchedule(autoStopOption, {
+    state: currentState,
+    now: Date.now(),
+  });
+  const isVisible = Boolean(text)
+    && currentState !== 'IDLE'
+    && currentState !== 'CONFIRMING_MIC'
+    && currentState !== 'SAVING'
+    && currentState !== 'ERROR';
+
+  for (const element of [elAutoStopStatusRecording, elAutoStopStatusPaused, elAutoStopStatusLimit]) {
+    element.hidden = !isVisible;
+    if (isVisible) {
+      element.textContent = text;
+    }
+  }
+}
+
 function setToggleButtonState(button, enabled) {
   button.classList.toggle('btn-toggle-on', enabled);
   button.classList.toggle('btn-toggle-off', !enabled);
+}
+
+async function pickSaveFileHandle(suggestedName) {
+  try {
+    const handle = await window.showSaveFilePicker({
+      suggestedName,
+      types: [{ description: 'WebM Video', accept: { 'video/webm': ['.webm'] } }],
+    });
+    return handle;
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      return null;
+    }
+    console.error('[popup] showSaveFilePicker error:', err);
+    return null;
+  }
 }
 
 // ─── Helper functions ─────────────────────────────────────────────────────────
@@ -711,12 +1020,18 @@ function buildFilename(tabTitle, date) {
   const safe = (tabTitle || 'recording')
     .replace(/[\\/:*?"<>|]/g, '_')
     .slice(0, 60);
-  const ts = date
-    .toISOString()
-    .slice(0, 19)
-    .replace('T', '_')
-    .replace(/:/g, '-');
+  const ts = formatLocalFilenameTimestamp(date);
   return `${safe}_${ts}.webm`;
+}
+
+function formatLocalFilenameTimestamp(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  const seconds = String(date.getSeconds()).padStart(2, '0');
+  return `${year}-${month}-${day}_${hours}-${minutes}-${seconds}`;
 }
 
 /**
@@ -799,15 +1114,60 @@ async function requestMicAccessFromDefaultDevice() {
       errorMessage: null,
     };
   } catch (err) {
-    console.warn('[popup] Forced mic request failed:', err);
+    const errorDetails = describeMicRequestFailure(err);
+    if (errorDetails.shouldWarn) {
+      console.warn('[popup] Forced mic request failed:', err);
+    }
     addDiag('popup', `getUserMedia(audio) failed: ${err?.name || 'Error'}: ${err?.message || 'unknown'}`);
-    window.alert('Microphone access was denied or unavailable. Please allow microphone access for this extension.');
+    if (errorDetails.userMessage) {
+      window.alert(errorDetails.userMessage);
+    }
     return {
       ok: false,
       deviceId: null,
       errorName: err?.name || 'Error',
       errorMessage: err?.message || 'unknown',
     };
+  }
+}
+
+function describeMicRequestFailure(err) {
+  const errorName = err?.name || 'Error';
+
+  switch (errorName) {
+    case 'NotAllowedError':
+    case 'PermissionDeniedError':
+    case 'SecurityError':
+      return {
+        shouldWarn: false,
+        userMessage: 'Microphone access was denied. Allow microphone access for this extension and try again.',
+      };
+
+    case 'NotFoundError':
+    case 'DevicesNotFoundError':
+      return {
+        shouldWarn: false,
+        userMessage: 'No microphone input device was found.',
+      };
+
+    case 'NotReadableError':
+    case 'TrackStartError':
+      return {
+        shouldWarn: true,
+        userMessage: 'Microphone is busy or unavailable. Close other apps that use it and try again.',
+      };
+
+    case 'AbortError':
+      return {
+        shouldWarn: false,
+        userMessage: 'Microphone request was cancelled.',
+      };
+
+    default:
+      return {
+        shouldWarn: true,
+        userMessage: 'Microphone access failed. Check microphone permissions and device availability, then try again.',
+      };
   }
 }
 
@@ -828,7 +1188,12 @@ function onGrantMicClick() {
 
 function addDiag(source, message, details) {
   if (!elDiagLog) return;
-  const ts = new Date().toISOString().slice(11, 19);
+  const now = new Date();
+  const ts = [
+    String(now.getHours()).padStart(2, '0'),
+    String(now.getMinutes()).padStart(2, '0'),
+    String(now.getSeconds()).padStart(2, '0'),
+  ].join(':');
   const parts = [`[${ts}] [${source}] ${message}`];
   if (details !== undefined) {
     parts.push(safeJson(details));
@@ -917,9 +1282,15 @@ async function listInputDevices() {
 
 function openDb() {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open('tab-recorder-db', 1);
+    const req = indexedDB.open('tab-recorder-db', DB_VERSION);
     req.onupgradeneeded = (e) => {
-      e.target.result.createObjectStore('tab-recorder-blobs');
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains(BLOB_STORE)) {
+        db.createObjectStore(BLOB_STORE);
+      }
+      if (!db.objectStoreNames.contains(META_STORE)) {
+        db.createObjectStore(META_STORE);
+      }
     };
     req.onsuccess = (e) => resolve(e.target.result);
     req.onerror   = (e) => reject(e.target.error);
@@ -929,8 +1300,8 @@ function openDb() {
 async function dbGet(key) {
   const db = await openDb();
   return new Promise((resolve, reject) => {
-    const tx  = db.transaction('tab-recorder-blobs', 'readonly');
-    const req = tx.objectStore('tab-recorder-blobs').get(key);
+    const tx  = db.transaction(BLOB_STORE, 'readonly');
+    const req = tx.objectStore(BLOB_STORE).get(key);
     req.onsuccess = (e) => resolve(e.target.result);
     req.onerror   = (e) => reject(e.target.error);
   });
@@ -939,9 +1310,75 @@ async function dbGet(key) {
 async function dbDelete(key) {
   const db = await openDb();
   return new Promise((resolve, reject) => {
-    const tx = db.transaction('tab-recorder-blobs', 'readwrite');
-    tx.objectStore('tab-recorder-blobs').delete(key);
+    const tx = db.transaction(BLOB_STORE, 'readwrite');
+    tx.objectStore(BLOB_STORE).delete(key);
     tx.oncomplete = resolve;
     tx.onerror    = (e) => reject(e.target.error);
   });
+}
+
+async function dbPutMeta(key, value) {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(META_STORE, 'readwrite');
+    tx.objectStore(META_STORE).put(value, key);
+    tx.oncomplete = resolve;
+    tx.onerror = (e) => reject(e.target.error);
+  });
+}
+
+async function dbGetMeta(key) {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(META_STORE, 'readonly');
+    const req = tx.objectStore(META_STORE).get(key);
+    req.onsuccess = (e) => resolve(e.target.result);
+    req.onerror = (e) => reject(e.target.error);
+  });
+}
+
+async function dbDeleteMeta(key) {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(META_STORE, 'readwrite');
+    tx.objectStore(META_STORE).delete(key);
+    tx.oncomplete = resolve;
+    tx.onerror = (e) => reject(e.target.error);
+  });
+}
+
+async function persistSaveHandle(handle) {
+  if (!handle) return;
+  try {
+    await dbPutMeta(SAVE_HANDLE_KEY, handle);
+    addDiag('popup', 'Persisted save handle for future popup restore');
+  } catch (err) {
+    console.warn('[popup] Failed to persist save handle:', err);
+    addDiag('popup', `Persist save handle failed: ${err?.name || 'Error'}: ${err?.message || 'unknown'}`);
+  }
+}
+
+async function restorePersistedSaveHandle() {
+  try {
+    const restoredHandle = await dbGetMeta(SAVE_HANDLE_KEY);
+    if (!restoredHandle) {
+      return null;
+    }
+    fileHandle = restoredHandle;
+    addDiag('popup', 'Restored persisted save handle');
+    return restoredHandle;
+  } catch (err) {
+    console.warn('[popup] Failed to restore save handle:', err);
+    addDiag('popup', `Restore save handle failed: ${err?.name || 'Error'}: ${err?.message || 'unknown'}`);
+    return null;
+  }
+}
+
+async function clearPersistedSaveHandle() {
+  try {
+    await dbDeleteMeta(SAVE_HANDLE_KEY);
+  } catch (err) {
+    console.warn('[popup] Failed to clear save handle:', err);
+    addDiag('popup', `Clear save handle failed: ${err?.name || 'Error'}: ${err?.message || 'unknown'}`);
+  }
 }

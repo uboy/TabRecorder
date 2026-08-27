@@ -8,7 +8,9 @@
     "scripting",
     "storage",
     "alarms",
-    "offscreen"
+    "offscreen",
+    "power",
+    "downloads"
   ],
   "host_permissions": ["<all_urls>"],
   "background": {

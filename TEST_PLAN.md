@@ -48,6 +48,7 @@ Out of scope: performance benchmarking, cross-browser testing, accessibility aud
 - [Suite 5 — Stop & Save Flow](#suite-5--stop--save-flow-fr-08-fr-09-fr-10-fr-18)
 - [Suite 6 — Popup UI & Status Display](#suite-6--popup-ui--status-display-fr-11)
 - [Suite 7 — Recording Limits](#suite-7--recording-limits-fr-12-fr-13-fr-14)
+- [Suite 7A — Scheduled Stop & Keep Awake](#suite-7a--scheduled-stop--keep-awake)
 - [Suite 8 — Popup Close Guard](#suite-8--popup-close-guard-fr-15)
 - [Suite 9 — Tab Closed Mid-Recording](#suite-9--tab-closed-mid-recording-fr-17)
 - [Suite 10 — Edge Cases & Error Handling](#suite-10--edge-cases--error-handling)
@@ -81,7 +82,7 @@ Out of scope: performance benchmarking, cross-browser testing, accessibility aud
 | Step | Action | Expected Result |
 |------|--------|-----------------|
 | 1 | Open extension `manifest.json` | File is valid JSON |
-| 2 | Check `permissions` array | Contains: `tabCapture`, `tabs`, `scripting`, `storage`, `microphone`, `alarms`, `offscreen` |
+| 2 | Check `permissions` array | Contains: `tabCapture`, `tabs`, `scripting`, `storage`, `alarms`, `offscreen`, `power` |
 | 3 | Check `host_permissions` | Contains `<all_urls>` |
 | 4 | Check `action.default_popup` | Value is `"popup/popup.html"` |
 | 5 | Check `background.service_worker` | Value is `"service-worker.js"` |
@@ -181,6 +182,24 @@ Out of scope: performance benchmarking, cross-browser testing, accessibility aud
 | 6 | Open file and listen at max volume | **No audio from Tab B** is audible |
 
 **Pass criteria:** Saved file is silent (or nearly silent); Tab B audio is completely absent.
+
+---
+
+### TC-014A · Speakers can be muted without losing recorded tab audio
+**Priority:** P1
+**FR:** FR-03
+
+**Preconditions:** Recorded tab is playing audible media.
+
+| Step | Action | Expected Result |
+|------|--------|-----------------|
+| 1 | Start recording the tab | RECORDING state |
+| 2 | Click `Speakers: On` so it switches to `Speakers: Off` | Sound from the tab stops in the PC speakers |
+| 3 | Keep recording for **10 seconds** with media still playing in the tab | Timer running |
+| 4 | Stop & Save | File saved |
+| 5 | Open the saved file and listen | **Recorded file still contains the tab audio** |
+
+**Pass criteria:** Local speaker playback is muted during capture, but the saved WebM still contains the tab audio stream.
 
 ---
 
@@ -786,6 +805,116 @@ Out of scope: performance benchmarking, cross-browser testing, accessibility aud
 
 ---
 
+## Suite 7A — Scheduled Stop & Keep Awake
+
+### TC-097 · Stop at specific system time auto-saves at the scheduled deadline
+**Priority:** P2
+**FR:** —
+
+**Preconditions:** System clock is known; choose a stop time 2-3 minutes in the future.
+
+| Step | Action | Expected Result |
+|------|--------|-----------------|
+| 1 | Open popup and select `Auto-stop -> Stop at time` | Time selector is visible |
+| 2 | Set the target time a few minutes ahead | Preview shows `Auto-stop at HH:MM` |
+| 3 | Click `Start Recording` | Save As dialog appears immediately |
+| 4 | Choose a destination and let recording run until the deadline | Popup remains in RECORDING state until the target time |
+| 5 | Observe popup at the target time | Popup switches to `SAVING` automatically without pressing `Stop & Save` |
+| 6 | Wait for completion | Popup returns to IDLE and the file exists at the chosen path |
+
+**Pass criteria:** Recording stops automatically at the configured wall-clock time and saves successfully.
+
+---
+
+### TC-098 · Stop-after interval freezes during pause and resumes after resume
+**Priority:** P1
+**FR:** —
+
+**Preconditions:** Interval auto-stop is enabled for 2 minutes.
+
+| Step | Action | Expected Result |
+|------|--------|-----------------|
+| 1 | Select `Auto-stop -> Stop after interval` and set `0 h 2 m` | Preview shows `Auto-stop in 00:02:00` |
+| 2 | Click `Start Recording` and choose a save path | Recording begins |
+| 3 | Wait about 30 seconds, then click `Pause` | Popup switches to PAUSED |
+| 4 | Stay paused for about 45 seconds | Auto-stop status remains frozen; recording does not stop while paused |
+| 5 | Click `Resume` | Recording resumes and the countdown continues from the remaining value |
+| 6 | Wait for the remaining ~90 seconds of active recording time | Popup auto-stops and saves |
+
+**Pass criteria:** Paused time does not consume the configured interval; only active recording time counts down.
+
+---
+
+### TC-099 · Recording session prevents system sleep and releases keep-awake after stop
+**Priority:** P2
+**FR:** —
+
+**Preconditions:** Test machine has a short OS sleep timeout configured for manual verification.
+
+| Step | Action | Expected Result |
+|------|--------|-----------------|
+| 1 | Start a recording and leave the machine idle beyond the normal sleep timeout | System stays awake while recording remains active |
+| 2 | Pause recording and leave it idle again | System still stays awake while the recording session is open |
+| 3 | Stop & Save or Cancel the recording | Session ends cleanly |
+| 4 | Leave the machine idle past the configured timeout | System can sleep again normally |
+
+**Pass criteria:** Keep-awake is active only during an open recording session and is released after stop/cancel.
+
+---
+
+### TC-100 · Interval auto-stop still saves after popup is closed and reopened
+**Priority:** P1
+**FR:** —
+
+**Preconditions:** `Auto-stop -> Stop after interval` is enabled for 1-2 minutes.
+
+| Step | Action | Expected Result |
+|------|--------|-----------------|
+| 1 | Click `Start Recording` and choose a destination file | Recording begins with the target path preselected |
+| 2 | Close the extension popup and continue working in the recorded tab | Recording continues in background |
+| 3 | Wait until the configured interval elapses | Recording stops automatically |
+| 4 | Reopen the popup after the stop | Popup restores the remembered save handle and completes save without asking for a new path |
+| 5 | Check the chosen destination path | The WebM file is present and playable |
+
+**Pass criteria:** Auto-stop by interval does not lose the preselected destination when popup has been closed during recording.
+
+---
+
+### TC-101 · Interval auto-stop saves without reopening popup
+**Priority:** P1
+**FR:** —
+
+**Preconditions:** `Auto-stop -> Stop after interval` is enabled for 1-2 minutes and a destination file is chosen at start.
+
+| Step | Action | Expected Result |
+|------|--------|-----------------|
+| 1 | Start recording with interval auto-stop and choose a destination file | Recording begins |
+| 2 | Close the popup and do not reopen it | Recording continues in background |
+| 3 | Wait for the interval to elapse | Recording stops automatically |
+| 4 | Check the chosen destination path without reopening popup first | The WebM file already exists and is playable |
+
+**Pass criteria:** Auto-stop saves directly from the offscreen pipeline and does not require reopening popup to finish the save.
+
+---
+
+### TC-102 · Emergency recovery page rescues a pending blob when popup is unavailable
+**Priority:** P1
+**FR:** —
+
+**Preconditions:** Interval auto-stop is enabled; popup is closed before recording finishes.
+
+| Step | Action | Expected Result |
+|------|--------|-----------------|
+| 1 | Start recording with interval auto-stop and choose a destination file | Recording begins |
+| 2 | Close popup and wait for auto-stop | Recording stops |
+| 3 | If the normal autosave path cannot complete, observe extension behavior | A dedicated recovery tab opens automatically |
+| 4 | Wait for the recovery tab flow | Browser download fallback starts automatically, or the page offers manual recovery controls |
+| 5 | Complete manual cleanup if needed | Blob is deleted only after successful recovery |
+
+**Pass criteria:** A failed popup/save-handle path no longer leaves the user without any rescue path; a dedicated recovery page handles the fallback.
+
+---
+
 ## Suite 8 — Popup Close Guard (FR-15)
 
 ### TC-111 · Closing popup during RECORDING shows browser warning
@@ -1085,6 +1214,7 @@ These tests verify that the documented constraints (L-01 through L-09) behave as
 | FR-16 | TC-037 |
 | FR-17 | TC-121, TC-122, TC-123 |
 | FR-18 | TC-059, TC-060, TC-061 |
+| Feature: Scheduled stop & keep awake | TC-097, TC-098, TC-099 |
 | L-01 | TC-141 |
 | L-04 | TC-142 |
 | L-06 | TC-143 |

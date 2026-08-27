@@ -11,6 +11,13 @@
  *                        ↘ (no mic)  ↗
  */
 
+importScripts('lib/recording-schedule.js');
+
+const RecordingSchedule = globalThis.RecordingSchedule;
+const KEEPALIVE_ALARM_NAME = 'keepalive';
+const AUTO_STOP_ALARM_NAME = 'recording-auto-stop';
+const RECOVERY_PAGE_PATH = 'recovery/recovery.html';
+
 // ─── State ────────────────────────────────────────────────────────────────────
 
 /** @type {'IDLE'|'CONFIRMING_MIC'|'RECORDING'|'PAUSED'|'LIMIT_PAUSED'|'SAVING'} */
@@ -36,6 +43,8 @@ let pendingForceMic = false;
 let pendingShowPointer = false;
 let pendingLockInteractions = false;
 let awaitingMicPermission = false;
+let pendingAutoStopOption = RecordingSchedule.createDisabledSchedule();
+let pendingStopAtTimeTargetTs = null;
 
 // Blob that finished while the popup was closed — delivered on next popup open
 let pendingBlobKey       = null;
@@ -45,20 +54,29 @@ let pendingSuggestedName = '';
 let currentForceMicOption = false;
 let currentShowPointerOption = false;
 let currentInteractionLockOption = false;
+let currentAutoStopOption = RecordingSchedule.createDisabledSchedule();
+let activeAutoStopSchedule = RecordingSchedule.createDisabledSchedule();
+let keepAwakeRequested = false;
+let recoveryBlobKey = null;
 
 // ─── Keepalive alarm ─────────────────────────────────────────────────────────
 
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.alarms.create('keepalive', { periodInMinutes: 0.4 });
+  chrome.alarms.create(KEEPALIVE_ALARM_NAME, { periodInMinutes: 0.4 });
 });
 
 chrome.runtime.onStartup.addListener(() => {
-  chrome.alarms.create('keepalive', { periodInMinutes: 0.4 });
+  chrome.alarms.create(KEEPALIVE_ALARM_NAME, { periodInMinutes: 0.4 });
 });
 
-// The alarm fires to wake the service worker; no additional action needed.
-chrome.alarms.onAlarm.addListener((_alarm) => {
-  // intentional no-op: waking the SW is sufficient
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === KEEPALIVE_ALARM_NAME) {
+    return;
+  }
+
+  if (alarm.name === AUTO_STOP_ALARM_NAME) {
+    handleAutoStopAlarm();
+  }
 });
 
 // ─── Long-lived popup port ───────────────────────────────────────────────────
@@ -69,10 +87,9 @@ chrome.runtime.onConnect.addListener((port) => {
   popupPort = port;
 
   // If a blob finished while the popup was closed, deliver it now.
-  if (pendingBlobKey) {
+  if (pendingBlobKey && recoveryBlobKey !== pendingBlobKey) {
+    setState('SAVING');
     port.postMessage({ type: 'BLOB_READY', blobKey: pendingBlobKey, suggestedName: pendingSuggestedName });
-    pendingBlobKey       = null;
-    pendingSuggestedName = '';
   }
 
   port.onDisconnect.addListener(() => {
@@ -99,6 +116,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         showPointer: message.showPointer,
         lockInteractions: message.lockInteractions,
         micDeviceId: message.micDeviceId,
+        autoStop: message.autoStop,
       });
       break;
 
@@ -110,11 +128,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       handleMicAnswer(message.include);
       break;
 
+    case 'SAVE_FLOW_FINISHED':
+      pendingBlobKey = null;
+      pendingSuggestedName = '';
+      recoveryBlobKey = null;
+      setState('IDLE');
+      sendToPopup(buildPopupStateUpdate('IDLE'));
+      break;
+
+    case 'SAVE_FLOW_DEFERRED':
+      setState('IDLE');
+      break;
+
     case 'STOP_RECORDING':
       if (state === 'RECORDING' || state === 'PAUSED' || state === 'LIMIT_PAUSED') {
-        disableInteractionLock();
-        sendToOffscreen({ type: 'STOP_MEDIA', target: 'offscreen' });
-        setState('SAVING');
+        stopRecordingSession();
       }
       break;
 
@@ -127,38 +155,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       } else if (state === 'RECORDING' || state === 'PAUSED' || state === 'LIMIT_PAUSED') {
         disablePointerOverlay();
         disableInteractionLock();
+        clearActiveAutoStopSchedule();
         sendToOffscreen({ type: 'CANCEL_MEDIA', target: 'offscreen' });
         recordingTabId = null;
         recordingTabTitle = '';
         resetPendingStartContext();
         setState('IDLE');
-        sendToPopup({ type: 'STATE_UPDATE', state: 'IDLE', elapsedSeconds: 0, totalBytes: 0 });
+        sendToPopup(buildPopupStateUpdate('IDLE'));
       }
       break;
 
     case 'PAUSE_RECORDING':
       if (state === 'RECORDING') {
+        pauseAutoStopForInactiveRecordingState('PAUSED');
         sendToOffscreen({ type: 'PAUSE_MEDIA', target: 'offscreen' });
         setState('PAUSED');
-        sendToPopup({
-          type: 'STATE_UPDATE',
-          state: 'PAUSED',
-          elapsedSeconds: cachedElapsedSeconds,
-          totalBytes: cachedTotalBytes,
-        });
+        sendToPopup(buildPopupStateUpdate('PAUSED'));
       }
       break;
 
     case 'RESUME_RECORDING':
       if (state === 'PAUSED') {
+        resumeAutoStopForRecordingState();
         sendToOffscreen({ type: 'RESUME_MEDIA', target: 'offscreen' });
         setState('RECORDING');
-        sendToPopup({
-          type: 'STATE_UPDATE',
-          state: 'RECORDING',
-          elapsedSeconds: cachedElapsedSeconds,
-          totalBytes: cachedTotalBytes,
-        });
+        sendToPopup(buildPopupStateUpdate('RECORDING'));
       }
       break;
 
@@ -173,21 +194,50 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         forceMic:            currentForceMicOption,
         showPointer:         currentShowPointerOption,
         lockInteractions:    currentInteractionLockOption,
+        autoStop:            getPopupAutoStopState(),
+        recoveryInProgress:  Boolean(recoveryBlobKey),
       });
       return true; // keep sendResponse channel open
 
+    case 'RECOVERY_SAVE_FINISHED':
+      if (!message.blobKey || message.blobKey === pendingBlobKey) {
+        pendingBlobKey = null;
+        pendingSuggestedName = '';
+      }
+      recoveryBlobKey = null;
+      setState('IDLE');
+      sendToPopup(buildPopupStateUpdate('IDLE'));
+      break;
+
+    case 'RECOVERY_SAVE_FAILED':
+      recoveryBlobKey = null;
+      sendToPopup({
+        type: 'DIAGNOSTIC',
+        source: 'sw',
+        level: 'warn',
+        message: 'Emergency recovery download failed; popup/manual save fallback remains available',
+        details: {
+          blobKey: message.blobKey || null,
+          error: message.error || 'unknown',
+        },
+      });
+      if (state === 'SAVING' && pendingBlobKey) {
+        setState('IDLE');
+      }
+      break;
+
     case 'CONFIRM_CONTINUE':
       if (state === 'LIMIT_PAUSED') {
+        resumeAutoStopForRecordingState();
         sendToOffscreen({ type: 'CONFIRM_CONTINUE', target: 'offscreen' });
         setState('RECORDING');
+        sendToPopup(buildPopupStateUpdate('RECORDING'));
       }
       break;
 
     case 'CONFIRM_STOP_AT_LIMIT':
       if (state === 'LIMIT_PAUSED') {
-        disableInteractionLock();
-        sendToOffscreen({ type: 'CONFIRM_STOP_AT_LIMIT', target: 'offscreen' });
-        setState('SAVING');
+        stopRecordingSession('CONFIRM_STOP_AT_LIMIT');
       }
       break;
 
@@ -248,6 +298,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   if (state !== 'RECORDING' && state !== 'PAUSED' && state !== 'LIMIT_PAUSED') return;
 
   console.log('[SW] Recorded tab closed; interrupting recording.');
+  clearActiveAutoStopSchedule();
   sendToOffscreen({ type: 'TAB_CLOSED_INTERRUPT', target: 'offscreen' });
   sendToPopup({ type: 'TAB_CLOSED' });
   setState('SAVING');
@@ -262,10 +313,19 @@ async function handleStartRecording(tabId, tabTitle, options = {}) {
   pendingShowPointer = Boolean(options.showPointer);
   pendingLockInteractions = Boolean(options.lockInteractions);
   const pendingMicDeviceId = typeof options.micDeviceId === 'string' ? options.micDeviceId : null;
+  pendingAutoStopOption = normalizeAutoStopOption(options.autoStop);
+  pendingStopAtTimeTargetTs = pendingAutoStopOption.mode === RecordingSchedule.MODE_AT_TIME
+    ? RecordingSchedule.computeNextAbsoluteTarget(
+      pendingAutoStopOption.hours,
+      pendingAutoStopOption.minutes,
+      Date.now()
+    )
+    : null;
 
   currentForceMicOption = pendingForceMic;
   currentShowPointerOption = pendingShowPointer;
   currentInteractionLockOption = pendingLockInteractions;
+  currentAutoStopOption = RecordingSchedule.cloneSchedule(pendingAutoStopOption);
   awaitingMicPermission = !pendingForceMic;
   sendMicDiagnostic('sw', 'handleStartRecording', {
     tabId,
@@ -273,6 +333,7 @@ async function handleStartRecording(tabId, tabTitle, options = {}) {
     showPointer: pendingShowPointer,
     lockInteractions: pendingLockInteractions,
     micDeviceId: pendingMicDeviceId || null,
+    autoStopMode: currentAutoStopOption.mode,
   });
 
   try {
@@ -374,28 +435,78 @@ function handleOffscreenMessage(message) {
     case 'STATE_UPDATE':
       cachedElapsedSeconds = message.elapsedSeconds;
       cachedTotalBytes     = message.totalBytes;
-      sendToPopup(message);
+      sendToPopup({ ...message, autoStop: getPopupAutoStopStateForState(message.state) });
       break;
 
     case 'LIMIT_REACHED':
+      pauseAutoStopForInactiveRecordingState('LIMIT_PAUSED');
       setState('LIMIT_PAUSED');
-      sendToPopup(message);
+      sendToPopup({
+        ...message,
+        state: 'LIMIT_PAUSED',
+        elapsedSeconds: cachedElapsedSeconds,
+        totalBytes: cachedTotalBytes,
+        autoStop: getPopupAutoStopStateForState('LIMIT_PAUSED'),
+      });
       break;
 
     case 'BLOB_READY':
       disablePointerOverlay();
       disableInteractionLock();
+      clearActiveAutoStopSchedule();
       resetPendingStartContext();
-      setState('IDLE');
       recordingTabId    = null;
       recordingTabTitle = '';
+      pendingBlobKey       = message.blobKey;
+      pendingSuggestedName = message.suggestedName || '';
       if (popupPort) {
+        setState('SAVING');
+        sendToPopup({
+          type: 'DIAGNOSTIC',
+          source: 'sw',
+          level: 'info',
+          message: 'Blob ready; delivering to popup save flow',
+          details: {
+            blobKey: message.blobKey,
+            suggestedName: pendingSuggestedName,
+          },
+        });
         sendToPopup(message);
       } else {
-        // Popup is closed — stash the key; deliver when popup next opens.
-        pendingBlobKey       = message.blobKey;
-        pendingSuggestedName = message.suggestedName || '';
+        recoveryBlobKey = message.blobKey;
+        setState('SAVING');
+        sendToPopup({
+          type: 'DIAGNOSTIC',
+          source: 'sw',
+          level: 'warn',
+          message: 'Popup is closed; opening emergency recovery saver',
+          details: {
+            blobKey: message.blobKey,
+            suggestedName: pendingSuggestedName,
+          },
+        });
+        openRecoverySaver(message.blobKey, pendingSuggestedName, 'popup-unavailable');
       }
+      break;
+
+    case 'AUTO_SAVE_SUCCESS':
+      disablePointerOverlay();
+      disableInteractionLock();
+      clearActiveAutoStopSchedule();
+      resetPendingStartContext();
+      pendingBlobKey = null;
+      pendingSuggestedName = '';
+      recoveryBlobKey = null;
+      recordingTabId = null;
+      recordingTabTitle = '';
+      setState('IDLE');
+      sendToPopup({
+        type: 'DIAGNOSTIC',
+        source: 'sw',
+        level: 'info',
+        message: 'Auto-save completed successfully',
+      });
+      sendToPopup(buildPopupStateUpdate('IDLE'));
       break;
 
     case 'TAB_CLOSED':
@@ -405,11 +516,12 @@ function handleOffscreenMessage(message) {
     case 'RECORDING_CANCELLED':
       disablePointerOverlay();
       disableInteractionLock();
+      clearActiveAutoStopSchedule();
       resetPendingStartContext();
       setState('IDLE');
       recordingTabId    = null;
       recordingTabTitle = '';
-      sendToPopup({ type: 'STATE_UPDATE', state: 'IDLE', elapsedSeconds: 0, totalBytes: 0 });
+      sendToPopup(buildPopupStateUpdate('IDLE'));
       break;
 
     case 'MIC_UNAVAILABLE':
@@ -418,6 +530,7 @@ function handleOffscreenMessage(message) {
       break;
 
     case 'MIC_DIAGNOSTIC':
+    case 'DIAGNOSTIC':
       sendToPopup(message);
       break;
 
@@ -427,6 +540,7 @@ function handleOffscreenMessage(message) {
       console.error('[SW] Offscreen error:', message.type, message.error);
       disablePointerOverlay();
       disableInteractionLock();
+      clearActiveAutoStopSchedule();
       resetPendingStartContext();
       setState('IDLE');
       recordingTabId    = null;
@@ -487,6 +601,7 @@ async function startCapture(tabId, tabTitle, includeMic, showPointer, lockIntera
     console.log('[SW] Got stream ID, sending START_MEDIA to offscreen.');
 
     const suggestedName = buildFilename(tabTitle, new Date());
+    activeAutoStopSchedule = buildActiveAutoStopSchedule();
 
     sendToOffscreen({
       type: 'START_MEDIA',
@@ -497,13 +612,15 @@ async function startCapture(tabId, tabTitle, includeMic, showPointer, lockIntera
       micDeviceId: typeof micOptions.micDeviceId === 'string' ? micOptions.micDeviceId : null,
       showPointer: pendingShowPointer,
       suggestedName,
+      autoSaveOnFinalize: RecordingSchedule.isScheduleEnabled(activeAutoStopSchedule),
     });
 
     setState('RECORDING');
+    syncAutoStopAlarmForState('RECORDING');
 
     // Immediately notify the popup so it shows RECORDING state and the
     // Stop button without waiting for the first STATE_UPDATE tick (1 s).
-    sendToPopup({ type: 'STATE_UPDATE', state: 'RECORDING', elapsedSeconds: 0, totalBytes: 0 });
+    sendToPopup(buildPopupStateUpdate('RECORDING'));
   });
 }
 
@@ -721,6 +838,8 @@ function resetPendingStartContext() {
   pendingShowPointer = false;
   pendingLockInteractions = false;
   awaitingMicPermission = false;
+  pendingAutoStopOption = RecordingSchedule.createDisabledSchedule();
+  pendingStopAtTimeTargetTs = null;
 }
 
 function sendMicDiagnostic(source, message, details) {
@@ -729,16 +848,170 @@ function sendMicDiagnostic(source, message, details) {
   console.log('[MIC_DIAG]', source, message, details || '');
 }
 
+function openRecoverySaver(blobKey, suggestedName, reason) {
+  const params = new URLSearchParams({
+    blobKey,
+    suggestedName: suggestedName || 'recording.webm',
+    reason: reason || 'unknown',
+  });
+  const url = chrome.runtime.getURL(`${RECOVERY_PAGE_PATH}?${params.toString()}`);
+  chrome.tabs.create({ url }, () => {
+    if (!chrome.runtime.lastError) {
+      return;
+    }
+    const error = chrome.runtime.lastError.message || 'tabs.create failed';
+    console.error('[SW] Failed to open recovery saver:', error);
+    sendToPopup({
+      type: 'DIAGNOSTIC',
+      source: 'sw',
+      level: 'error',
+      message: 'Failed to open emergency recovery saver',
+      details: {
+        blobKey,
+        suggestedName,
+        error,
+      },
+    });
+  });
+}
+
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
 function setState(newState) {
   state = newState;
-  const isActive = newState === 'RECORDING' || newState === 'PAUSED' || newState === 'LIMIT_PAUSED';
-  chrome.action.setBadgeText({ text: isActive ? '●' : '' });
+  const showActiveBadge = isSessionActiveState(newState);
+  chrome.action.setBadgeText({ text: showActiveBadge ? '●' : '' });
   chrome.action.setBadgeBackgroundColor({ color: '#dc2626' });
+  syncKeepAwake(shouldKeepAwakeForState(newState));
   if (newState === 'IDLE') {
     cachedElapsedSeconds = 0;
     cachedTotalBytes     = 0;
+  }
+}
+
+function buildPopupStateUpdate(targetState = state) {
+  return {
+    type: 'STATE_UPDATE',
+    state: targetState,
+    elapsedSeconds: cachedElapsedSeconds,
+    totalBytes: cachedTotalBytes,
+    autoStop: getPopupAutoStopStateForState(targetState),
+  };
+}
+
+function normalizeAutoStopOption(rawOption) {
+  try {
+    return RecordingSchedule.normalizeScheduleOption(rawOption);
+  } catch (err) {
+    console.warn('[SW] Invalid auto-stop option:', err.message);
+    return RecordingSchedule.createDisabledSchedule();
+  }
+}
+
+function getPopupAutoStopState() {
+  return getPopupAutoStopStateForState(state);
+}
+
+function getPopupAutoStopStateForState(targetState) {
+  if (isSessionActiveState(targetState)) {
+    return RecordingSchedule.cloneSchedule(activeAutoStopSchedule);
+  }
+  return RecordingSchedule.cloneSchedule(currentAutoStopOption);
+}
+
+function buildActiveAutoStopSchedule() {
+  if (pendingAutoStopOption.mode === RecordingSchedule.MODE_AT_TIME) {
+    return RecordingSchedule.activateSchedule(pendingAutoStopOption, Date.now(), {
+      targetTs: pendingStopAtTimeTargetTs,
+    });
+  }
+  return RecordingSchedule.activateSchedule(pendingAutoStopOption, Date.now());
+}
+
+function clearAutoStopAlarm() {
+  chrome.alarms.clear(AUTO_STOP_ALARM_NAME, () => {});
+}
+
+function clearActiveAutoStopSchedule() {
+  activeAutoStopSchedule = RecordingSchedule.createDisabledSchedule();
+  clearAutoStopAlarm();
+}
+
+function pauseAutoStopForInactiveRecordingState(targetState) {
+  activeAutoStopSchedule = RecordingSchedule.pauseActiveSchedule(activeAutoStopSchedule, Date.now());
+  syncAutoStopAlarmForState(targetState);
+}
+
+function resumeAutoStopForRecordingState() {
+  activeAutoStopSchedule = RecordingSchedule.resumeActiveSchedule(activeAutoStopSchedule, Date.now());
+  syncAutoStopAlarmForState('RECORDING');
+}
+
+function syncAutoStopAlarmForState(targetState) {
+  clearAutoStopAlarm();
+
+  if (!isSessionActiveState(targetState) || !RecordingSchedule.isScheduleEnabled(activeAutoStopSchedule)) {
+    return;
+  }
+
+  if (activeAutoStopSchedule.mode === RecordingSchedule.MODE_AFTER_INTERVAL && targetState !== 'RECORDING') {
+    return;
+  }
+
+  const targetTs = RecordingSchedule.getAlarmTarget(activeAutoStopSchedule);
+  if (targetTs !== null) {
+    chrome.alarms.create(AUTO_STOP_ALARM_NAME, { when: targetTs });
+  }
+}
+
+function handleAutoStopAlarm() {
+  if (!isSessionActiveState(state)) {
+    clearAutoStopAlarm();
+    return;
+  }
+
+  console.log('[SW] Auto-stop alarm fired.');
+  sendToPopup({
+    type: 'DIAGNOSTIC',
+    source: 'sw',
+    level: 'info',
+    message: 'Auto-stop alarm fired',
+  });
+  stopRecordingSession();
+}
+
+function stopRecordingSession(offscreenMessageType = 'STOP_MEDIA') {
+  disableInteractionLock();
+  clearActiveAutoStopSchedule();
+  sendToOffscreen({ type: offscreenMessageType, target: 'offscreen' });
+  setState('SAVING');
+  sendToPopup(buildPopupStateUpdate('SAVING'));
+}
+
+function isSessionActiveState(targetState) {
+  return targetState === 'RECORDING' || targetState === 'PAUSED' || targetState === 'LIMIT_PAUSED';
+}
+
+function shouldKeepAwakeForState(targetState) {
+  return isSessionActiveState(targetState) || targetState === 'SAVING';
+}
+
+function syncKeepAwake(shouldKeepAwake) {
+  try {
+    if (shouldKeepAwake) {
+      if (!keepAwakeRequested) {
+        chrome.power.requestKeepAwake('system');
+        keepAwakeRequested = true;
+      }
+      return;
+    }
+
+    if (keepAwakeRequested) {
+      chrome.power.releaseKeepAwake();
+      keepAwakeRequested = false;
+    }
+  } catch (err) {
+    console.warn('[SW] Keep-awake API failed:', err.message);
   }
 }
 
@@ -782,8 +1055,10 @@ function isOffscreenMessage(type) {
     'STATE_UPDATE',
     'LIMIT_REACHED',
     'BLOB_READY',
+    'AUTO_SAVE_SUCCESS',
     'MIC_UNAVAILABLE',
     'MIC_DIAGNOSTIC',
+    'DIAGNOSTIC',
     'CODEC_FALLBACK',
     'CAPTURE_ERROR',
     'RECORDER_ERROR',
@@ -807,10 +1082,16 @@ function buildFilename(tabTitle, date) {
   const safe = (tabTitle || 'recording')
     .replace(/[\\/:*?"<>|]/g, '_')
     .slice(0, 60);
-  const ts = date
-    .toISOString()
-    .slice(0, 19)
-    .replace('T', '_')
-    .replace(/:/g, '-');
+  const ts = formatLocalFilenameTimestamp(date);
   return `${safe}_${ts}.webm`;
+}
+
+function formatLocalFilenameTimestamp(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  const seconds = String(date.getSeconds()).padStart(2, '0');
+  return `${year}-${month}-${day}_${hours}-${minutes}-${seconds}`;
 }

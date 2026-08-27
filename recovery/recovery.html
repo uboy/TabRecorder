@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Recording Recovery</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f6f7fb;
+        --card: #ffffff;
+        --text: #111827;
+        --muted: #6b7280;
+        --accent: #2563eb;
+        --warn: #b45309;
+        --ok: #15803d;
+        --border: #dbe2f1;
+      }
+
+      body {
+        margin: 0;
+        padding: 24px;
+        font: 14px/1.5 "Segoe UI", sans-serif;
+        background: radial-gradient(circle at top, #ffffff 0%, var(--bg) 55%);
+        color: var(--text);
+      }
+
+      .card {
+        max-width: 760px;
+        margin: 0 auto;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        padding: 24px;
+        box-shadow: 0 20px 40px rgba(15, 23, 42, 0.08);
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: 24px;
+      }
+
+      p {
+        margin: 0 0 12px;
+        color: var(--muted);
+      }
+
+      .status {
+        margin: 16px 0;
+        padding: 12px 14px;
+        border-radius: 12px;
+        background: #eef2ff;
+        color: #1d4ed8;
+      }
+
+      .status.ok {
+        background: #ecfdf5;
+        color: var(--ok);
+      }
+
+      .status.warn {
+        background: #fffbeb;
+        color: var(--warn);
+      }
+
+      .actions {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin: 18px 0;
+      }
+
+      button,
+      a.button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 42px;
+        padding: 0 16px;
+        border-radius: 10px;
+        border: 1px solid transparent;
+        background: var(--accent);
+        color: #fff;
+        text-decoration: none;
+        cursor: pointer;
+        font: inherit;
+      }
+
+      button.secondary,
+      a.button.secondary {
+        background: #fff;
+        color: var(--text);
+        border-color: var(--border);
+      }
+
+      pre {
+        margin: 18px 0 0;
+        padding: 14px;
+        border-radius: 12px;
+        background: #0f172a;
+        color: #cbd5e1;
+        overflow: auto;
+        min-height: 180px;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Recording Recovery</h1>
+      <p>If the normal save flow failed, this page will try to rescue the recording through the browser download pipeline.</p>
+      <div id="status" class="status">Preparing recovery...</div>
+      <div class="actions">
+        <button id="btn-retry-download" type="button">Retry emergency download</button>
+        <a id="btn-manual-download" class="button secondary" href="#" download hidden>Manual download</a>
+        <button id="btn-cleanup" type="button" class="secondary">Cleanup after manual save</button>
+      </div>
+      <pre id="log">[recovery] ready</pre>
+    </div>
+    <script src="recovery.js"></script>
+  </body>
+  </html>

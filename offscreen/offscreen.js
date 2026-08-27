@@ -23,6 +23,10 @@ import { AudioMixer } from '../lib/audio-mixer.js';
 // PROD — comment out when using debug values above:
 const TIME_LIMIT_SECONDS = 18000;
 const SIZE_LIMIT_BYTES   = 10_737_418_240;
+const DB_VERSION = 2;
+const BLOB_STORE = 'tab-recorder-blobs';
+const META_STORE = 'tab-recorder-meta';
+const SAVE_HANDLE_KEY = 'pending-save-handle';
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ─── Session state ────────────────────────────────────────────────────────────
@@ -37,14 +41,21 @@ let suggestedName = '';
 let tabStream     = null;
 let micStream     = null;
 let monitorAudio  = null;  // <audio> element that plays tab audio to speakers
+let autoSaveOnFinalize = false;
 
 // ─── IndexedDB helpers ────────────────────────────────────────────────────────
 
 function openDb() {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open('tab-recorder-db', 1);
+    const req = indexedDB.open('tab-recorder-db', DB_VERSION);
     req.onupgradeneeded = (e) => {
-      e.target.result.createObjectStore('tab-recorder-blobs');
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains(BLOB_STORE)) {
+        db.createObjectStore(BLOB_STORE);
+      }
+      if (!db.objectStoreNames.contains(META_STORE)) {
+        db.createObjectStore(META_STORE);
+      }
     };
     req.onsuccess = (e) => resolve(e.target.result);
     req.onerror   = (e) => reject(e.target.error);
@@ -54,10 +65,30 @@ function openDb() {
 async function dbPut(key, value) {
   const db = await openDb();
   return new Promise((resolve, reject) => {
-    const tx = db.transaction('tab-recorder-blobs', 'readwrite');
-    tx.objectStore('tab-recorder-blobs').put(value, key);
+    const tx = db.transaction(BLOB_STORE, 'readwrite');
+    tx.objectStore(BLOB_STORE).put(value, key);
     tx.oncomplete = resolve;
     tx.onerror    = (e) => reject(e.target.error);
+  });
+}
+
+async function dbGetMeta(key) {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(META_STORE, 'readonly');
+    const req = tx.objectStore(META_STORE).get(key);
+    req.onsuccess = (e) => resolve(e.target.result);
+    req.onerror = (e) => reject(e.target.error);
+  });
+}
+
+async function dbDeleteMeta(key) {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(META_STORE, 'readwrite');
+    tx.objectStore(META_STORE).delete(key);
+    tx.oncomplete = resolve;
+    tx.onerror = (e) => reject(e.target.error);
   });
 }
 
@@ -66,6 +97,16 @@ async function dbPut(key, value) {
 function sendToSW(message) {
   chrome.runtime.sendMessage({ target: 'sw', ...message }).catch(() => {
     // SW may be sleeping; message delivery is best-effort for non-critical signals.
+  });
+}
+
+function sendDiagnostic(message, details, level = 'info') {
+  sendToSW({
+    type: 'DIAGNOSTIC',
+    source: 'offscreen',
+    message,
+    details,
+    level,
   });
 }
 
@@ -155,7 +196,10 @@ function startMonitor() {
   monitorAudio = new Audio();
   monitorAudio.srcObject = new MediaStream(audioTracks);
   monitorAudio.play().catch((err) => {
-    console.warn('[offscreen] monitor play error:', err);
+    sendDiagnostic('Monitor audio playback failed', {
+      errorName: err?.name || 'Error',
+      errorMessage: err?.message || 'unknown',
+    }, 'warn');
   });
 }
 
@@ -187,7 +231,49 @@ function resetSession() {
   elapsedBaseMs = 0;
   segmentStartedAt = null;
   suggestedName = '';
+  autoSaveOnFinalize = false;
   stopAllTracks();
+}
+
+async function clearPersistedSaveHandle() {
+  try {
+    await dbDeleteMeta(SAVE_HANDLE_KEY);
+  } catch (err) {
+    console.warn('[offscreen] Failed to clear persisted save handle:', err);
+  }
+}
+
+async function tryAutoSaveBlob(blob) {
+  const handle = await dbGetMeta(SAVE_HANDLE_KEY);
+  if (!handle) {
+    sendDiagnostic('Auto-save handle missing; falling back to popup save', {
+      suggestedName,
+    }, 'warn');
+    return { ok: false, reason: 'missing-handle' };
+  }
+
+  try {
+    const writable = await handle.createWritable();
+    await writable.write(blob);
+    await writable.close();
+    await clearPersistedSaveHandle();
+    sendDiagnostic('Auto-save completed directly from offscreen', {
+      suggestedName,
+      sizeBytes: blob.size,
+    });
+    return { ok: true };
+  } catch (err) {
+    sendDiagnostic('Auto-save write failed; falling back to popup save', {
+      suggestedName,
+      sizeBytes: blob.size,
+      errorName: err?.name || 'Error',
+      errorMessage: err?.message || 'write-failed',
+    }, 'warn');
+    return {
+      ok: false,
+      reason: `${err?.name || 'Error'}: ${err?.message || 'write-failed'}`,
+    };
+  }
 }
 
 // ─── Finalize recording: assemble blob → IndexedDB → notify SW ───────────────
@@ -210,10 +296,22 @@ function finalizeRecording({ discard = false } = {}) {
           return;
         }
 
-        const blob    = new Blob(chunks, { type: 'video/webm' });
-        const blobKey = generateUUID();
+        const blob = new Blob(chunks, { type: 'video/webm' });
+        if (autoSaveOnFinalize) {
+          const autoSaveResult = await tryAutoSaveBlob(blob);
+          if (autoSaveResult.ok) {
+            sendToSW({ type: 'AUTO_SAVE_SUCCESS' });
+            return;
+          }
+        }
 
+        const blobKey = generateUUID();
         await dbPut(blobKey, blob);
+        sendDiagnostic('Blob persisted to IndexedDB for popup save flow', {
+          blobKey,
+          suggestedName,
+          sizeBytes: blob.size,
+        });
 
         sendToSW({ type: 'BLOB_READY', blobKey, suggestedName });
       } catch (err) {
@@ -240,17 +338,19 @@ function finalizeRecording({ discard = false } = {}) {
 
 // ─── START_MEDIA handler ──────────────────────────────────────────────────────
 
-async function handleStartMedia({ streamId, includeMic, forceMic, micDeviceId, suggestedName: name }) {
+async function handleStartMedia({ streamId, includeMic, forceMic, micDeviceId, suggestedName: name, autoSaveOnFinalize: shouldAutoSave }) {
   console.log('[offscreen] START_MEDIA received. streamId:', streamId, 'includeMic:', includeMic, 'forceMic:', forceMic);
   sendMicDiagnostic('START_MEDIA received', {
     includeMic: Boolean(includeMic),
     forceMic: Boolean(forceMic),
     micDeviceId: micDeviceId || null,
+    autoSaveOnFinalize: Boolean(shouldAutoSave),
   });
 
   // Clean up any previous session defensively
   resetSession();
   suggestedName = name || 'recording';
+  autoSaveOnFinalize = Boolean(shouldAutoSave);
 
   // 1. Acquire tab stream.
   //    The `mandatory` wrapper is required for chromeMediaSource in offscreen
@@ -360,7 +460,10 @@ async function handleStartMedia({ streamId, includeMic, forceMic, micDeviceId, s
       }
 
       // Mic failure is non-fatal when mic was optional.
-      console.warn('[offscreen] Mic unavailable, falling back to tab audio:', err.name, err.message);
+      sendDiagnostic('Microphone unavailable; continuing with tab audio only', {
+        errorName: err?.name || 'Error',
+        errorMessage: err?.message || 'unknown',
+      }, 'warn');
       sendToSW({ type: 'MIC_UNAVAILABLE' });
       micStream = null;
     }

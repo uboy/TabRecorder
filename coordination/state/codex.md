@@ -62,3 +62,128 @@
   - SW now applies/syncs `TOGGLE_INTERACTION_LOCK` during `CONFIRMING_MIC` via `pendingTabId` and `pendingLockInteractions`.
 - Cancel + first-lock-toggle-fix task completed.
 - Syntax verification passed for SW/offscreen/popup.
+- New task started: `2026-04-25-scheduled-stop-keepawake`.
+- Startup ritual for this session completed:
+  - read local `coordination/tasks.jsonl`,
+  - read local `coordination/state/codex.md`,
+  - checked for repo policy files referenced by AGENTS; `policy/task-routing-matrix.json` and `policy/team-lead-orchestrator.md` are not present in the repository,
+  - read `%USERPROFILE%/AGENTS-cold.md` to resolve Rule 28 bootstrap details.
+- Classified current request as `non_trivial repo_change`.
+- Current architecture findings:
+  - `service-worker.js` is the canonical owner of session state and already has `chrome.alarms` permission + lifecycle hooks.
+  - `offscreen/offscreen.js` tracks active elapsed time for recording/limit logic but does not own any wall-clock scheduler.
+  - `popup/popup.js` currently exposes start options for force-mic, pointer, and input lock only.
+  - `manifest.json` does not include the `power` permission required for sleep prevention.
+- Planning direction captured in `.scratchpad/research.md` and `.scratchpad/plan.md`.
+- Open assumption for user review: both absolute-time stop and interval stop use wall-clock system time and keep counting while the session is paused.
+- Next: wait for plan confirmation before implementation, per repo design-first workflow.
+- User clarified the intended behavior:
+  - `Stop at time` stays tied to system wall-clock time,
+  - `Stop after interval` must freeze during pause and continue after resume.
+- Implemented scheduled-stop and keep-awake feature set:
+  - added shared helper `lib/recording-schedule.js` for option normalization, target-time calculation, and pause/resume interval math,
+  - added popup controls for `Off` / `Stop at time` / `Stop after interval`,
+  - pre-open save handle only when auto-stop is enabled so scheduled stop can save without a click,
+  - service worker now owns auto-stop alarm state and `chrome.power` keep-awake lifecycle,
+  - interval auto-stop is frozen in `PAUSED` and `LIMIT_PAUSED`, then resumed on `RESUME_RECORDING` / `CONFIRM_CONTINUE`,
+  - added docs updates in `README.md` and `TEST_PLAN.md`,
+  - added automated verification script `scripts/verify-recording-schedule.js`.
+- Verification completed:
+  - `node --check service-worker.js` PASS
+  - `node --check popup/popup.js` PASS
+  - `node --check offscreen/offscreen.js` PASS
+  - `node --check lib/recording-schedule.js` PASS
+  - `node scripts/verify-recording-schedule.js` PASS (`5` checks)
+  - `Get-Content manifest.json | ConvertFrom-Json | Out-Null` PASS
+- Residual manual QA focus:
+  - scheduled stop with pre-opened save path in real Chrome,
+  - keep-awake behavior against OS sleep timeout,
+  - auto-stop plus popup close still needs manual Chrome verification because the file handle itself lives in popup memory.
+- New follow-up task started: `2026-04-25-save-flow-followup`.
+- Scope:
+  - fix premature keep-awake release during the final save flow,
+  - preserve pending blob when retry `showSaveFilePicker()` is cancelled with `AbortError`,
+  - clarify speaker-monitor wording in UI/docs.
+- Follow-up implementation details:
+  - `service-worker.js` now keeps `chrome.power` active through `SAVING` and releases it only after explicit `SAVE_FLOW_FINISHED` or deferred save dismissal,
+  - pending blob state is no longer cleared when the popup reconnects before the save flow completes,
+  - `SAVE_FLOW_DEFERRED` no longer pushes an `IDLE` state update back into the popup error screen,
+  - `popup/popup.js` preserves the blob on retry-picker cancel and lets the user save it later from the `ERROR` screen,
+  - monitor toggle wording changed from `Tab audio` to `Speakers` to make it clear this controls only local playback.
+- Follow-up verification:
+  - `node --check service-worker.js` PASS
+  - `node --check popup/popup.js` PASS
+  - `node --check offscreen/offscreen.js` PASS
+- Updated docs:
+  - `README.md` now documents `Speakers: Off` semantics and popup reopen/save behavior,
+  - `TEST_PLAN.md` now includes a dedicated speaker-mute validation case.
+- New follow-up task started: `2026-04-25-mic-preflight-errors`.
+- Scope:
+  - make popup microphone preflight failures user-meaningful instead of collapsing everything into one generic alert,
+  - clear stale `forcedMicDeviceId` when forced-mic start preflight fails.
+- Follow-up implementation details:
+  - `popup/popup.js` now maps `getUserMedia` failure names to specific user-facing messages (`denied`, `no device`, `busy`, `cancelled`, fallback generic),
+  - expected user-denial style failures no longer emit a noisy console warning,
+  - forced-mic start path now resets `forcedMicDeviceId` before aborting on preflight failure.
+- New follow-up task started: `2026-04-25-autostop-save-handle-persistence`.
+- Scope:
+  - fix interval/auto-stop save failures caused by popup-local `FileSystemFileHandle` state being lost after popup close,
+  - persist and restore the preselected save destination across popup reopen.
+- Follow-up implementation details:
+  - `popup/popup.js` now stores the selected `FileSystemFileHandle` in IndexedDB and restores it on popup startup before handling `pendingBlobKey`,
+  - stale remembered handles are cleared on successful save, cancel, discard, and failed-write retry paths,
+  - `offscreen/offscreen.js` was bumped to the same IndexedDB schema version so blob writes and popup meta storage share a consistent database version.
+- Follow-up verification:
+  - `node --check popup/popup.js` PASS
+  - `node --check offscreen/offscreen.js` PASS
+- Updated docs:
+  - `README.md` now documents that auto-stop save handles are restored after popup reopen,
+  - `TEST_PLAN.md` now includes a popup-close interval auto-stop regression case.
+- New follow-up task started: `2026-04-25-offscreen-autosave`.
+- Scope:
+  - remove popup reopening from the critical path of interval auto-stop save,
+  - perform direct auto-save from `offscreen` whenever a preselected auto-stop destination exists.
+- Follow-up implementation details:
+  - `service-worker.js` now passes `autoSaveOnFinalize` to `offscreen` for scheduled-stop sessions,
+  - `offscreen/offscreen.js` now restores the persisted save handle from IndexedDB and attempts direct `createWritable()` save on finalize before falling back to `BLOB_READY`,
+  - `service-worker.js` handles `AUTO_SAVE_SUCCESS` and returns the extension state to `IDLE` cleanly,
+  - `popup/popup.js` now clears stale local save state on `IDLE`.
+- Follow-up verification:
+  - `node --check service-worker.js` PASS
+  - `node --check offscreen/offscreen.js` PASS
+  - `node --check popup/popup.js` PASS
+- Updated docs:
+  - `README.md` now documents direct offscreen auto-save with popup reopen only as fallback,
+  - `TEST_PLAN.md` now includes a no-popup-reopen auto-stop regression case.
+- New follow-up task started: `2026-04-25-local-timestamps`.
+- Scope:
+  - fix UTC-derived timestamps in visible filename and popup diagnostics output,
+  - keep scheduling math unchanged and only change presentation/label formatting.
+- Follow-up implementation details:
+  - `popup/popup.js` filename timestamps now use local date/time parts instead of `toISOString()`,
+  - popup diagnostics timestamps now use local `HH:MM:SS`,
+  - `service-worker.js` filename generation now matches the same local timestamp format.
+- New follow-up task started: `2026-04-25-autosave-fallback-preserve-handle`.
+- Scope:
+  - stop `offscreen` auto-save from destroying the stored save handle before popup fallback can use it,
+  - avoid blocking direct auto-save on a pre-checked permission state.
+- Follow-up implementation details:
+  - `offscreen/offscreen.js` no longer clears the persisted save handle when direct auto-save fails,
+  - direct auto-save now attempts `createWritable()` immediately instead of rejecting early on `queryPermission()`.
+- New follow-up task started: `2026-04-26-diagnostics-observability`.
+- Scope:
+  - replace noisy `offscreen` warnings for fallback scenarios with structured diagnostics,
+  - surface more user-triggered events and save-flow failures inside popup diagnostics.
+- Follow-up implementation details:
+  - added a generic `DIAGNOSTIC` message path from `offscreen`/`service-worker` to popup,
+  - `offscreen` now reports auto-save fallback and optional mic fallback as diagnostics instead of `console.warn`,
+  - `popup` now logs stop/pause/resume/continue/save-partial/discard actions and save/retry failure details.
+- New follow-up task started: `2026-04-26-emergency-recovery-download`.
+- Scope:
+  - add an independent rescue path when popup/save-handle flow is unavailable,
+  - let the extension open a dedicated recovery page and try browser-download fallback automatically.
+- Follow-up implementation details:
+  - `manifest.json` now includes `downloads` permission,
+  - `service-worker.js` opens `recovery/recovery.html` when `BLOB_READY` arrives without an available popup and tracks `recoveryInProgress`,
+  - `recovery/recovery.js` loads the blob from IndexedDB, starts `chrome.downloads.download`, and reports success/failure back to the service worker,
+  - popup startup now avoids racing a blob that is already owned by recovery flow.
