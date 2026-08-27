@@ -854,7 +854,9 @@ async function requestMicAccessFromDefaultDevice() {
   } catch (err) {
     console.warn('[popup] Forced mic request failed:', err);
     addDiag('popup', `getUserMedia(audio) failed: ${err?.name || 'Error'}: ${err?.message || 'unknown'}`);
-    document.getElementById('mic-warning').textContent = 'Microphone access denied. Please open this extension in a full tab to grant permission.'; document.getElementById('mic-warning').hidden = false;
+    document.getElementById('mic-warning').textContent =
+      'Microphone access denied. Click Grant Mic or check Firefox microphone permissions in settings.';
+    document.getElementById('mic-warning').hidden = false;
     return {
       ok: false,
       deviceId: null,
@@ -869,7 +871,16 @@ function onDiagClearClick() {
   elDiagLog.textContent = '[diag] cleared';
 }
 
-function onGrantMicClick() { addDiag('popup', 'Grant Mic clicked'); if (window.innerWidth < 600) { chrome.tabs.create({ url: chrome.runtime.getURL('popup/popup.html') }); return; } requestMicAccessFromDefaultDevice().then((result) => { if (result.ok) { addDiag('popup', 'Grant Mic succeeded'); } refreshMicPermissionStatus(); }); }
+function onGrantMicClick() {
+  addDiag('popup', 'Grant Mic clicked');
+  // In Firefox, opening a full-tab popup doesn't work well — just request directly.
+  requestMicAccessFromDefaultDevice().then((result) => {
+    if (result.ok) {
+      addDiag('popup', 'Grant Mic succeeded');
+    }
+    refreshMicPermissionStatus();
+  });
+}
 
 function addDiag(source, message, details) {
   if (!elDiagLog) return;
@@ -900,7 +911,7 @@ function safeJson(value) {
 
 function isCapturablePage(url) {
   if (!url) return true;
-  return !/^(chrome|edge|about|chrome-extension):/i.test(url);
+  return !/^(chrome|edge|about|chrome-extension|moz-extension):/i.test(url);
 }
 
 async function refreshMicPermissionStatus() {
