@@ -816,7 +816,20 @@ function onDiagClearClick() {
   elDiagLog.textContent = '[diag] cleared';
 }
 
-function onGrantMicClick() { addDiag('popup', 'Grant Mic clicked'); if (window.innerWidth < 600) { chrome.tabs.create({ url: chrome.runtime.getURL('popup/popup.html') }); return; } requestMicAccessFromDefaultDevice().then((result) => { if (result.ok) { addDiag('popup', 'Grant Mic succeeded'); } refreshMicPermissionStatus(); }); }
+function onGrantMicClick() {
+  addDiag('popup', 'Grant Mic clicked');
+  // In narrow popups, open a full-tab version for better UX.
+  if (window.innerWidth < 600) {
+    chrome.tabs.create({ url: chrome.runtime.getURL('popup/popup.html') });
+    return;
+  }
+  requestMicAccessFromDefaultDevice().then((result) => {
+    if (result.ok) {
+      addDiag('popup', 'Grant Mic succeeded');
+    }
+    refreshMicPermissionStatus();
+  });
+}
 
 function addDiag(source, message, details) {
   if (!elDiagLog) return;
