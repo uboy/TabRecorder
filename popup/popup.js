@@ -24,7 +24,7 @@ let activeTabTitle    = '';
 let activeTabUrl      = '';
 let recordingTabTitle = '';     // title of the tab being recorded (from SW)
 let monitorOn         = true;   // whether tab audio plays to speakers
-let forceMicEnabled   = false;  // include microphone even without mic confirmation flow
+let forceMicEnabled   = true;  // include microphone by default
 let pointerEnabled    = false;  // draw pointer overlay in recorded tab
 let interactionLockEnabled = false; // block interaction with recorded tab
 let forcedMicDeviceId = null;   // concrete input device selected during forced mic access check
@@ -300,6 +300,7 @@ async function onStartClick() {
   // which captures via getDisplayMedia inside its own user gesture.
   if (!chrome.tabCapture) {
     addDiag('popup', 'tabCapture unavailable (Firefox), opening recorder window');
+    alert('Внимание: Firefox не поддерживает фоновую запись вкладок (tabCapture).\n\nОткроется отдельное окно рекордера. В нём нужно будет нажать "Start", а затем в диалоге Firefox выбрать нужную вкладку.\n\nОкно свернётся автоматически во время записи. Не закрывайте его!');
     const params = new URLSearchParams();
     if (activeTabTitle) params.set('tabTitle', activeTabTitle);
     params.set('forceMic', String(forceMicEnabled));
@@ -409,13 +410,13 @@ function onForceMicClick() {
   if (appliesNextRecording) {
     addDiag(
       'popup',
-      `Force Mic toggled: ${forceMicEnabled ? 'ON' : 'OFF'} (will apply on next recording)`
+      `Microphone toggled: ${forceMicEnabled ? 'ON' : 'OFF'} (will apply on next recording)`
     );
     window.alert(
-      'Force Mic applies from the next recording. Stop current recording and start a new one to capture microphone audio.'
+      'Microphone option applies from the next recording. Stop current recording and start a new one to apply changes.'
     );
   } else {
-    addDiag('popup', `Force Mic toggled: ${forceMicEnabled ? 'ON' : 'OFF'}`);
+    addDiag('popup', `Microphone toggled: ${forceMicEnabled ? 'ON' : 'OFF'}`);
   }
 }
 
@@ -657,7 +658,7 @@ function updateMonitorButton() {
 }
 
 function updateForceMicButton() {
-  const label = forceMicEnabled ? 'Force Mic: On' : 'Force Mic: Off';
+  const label = forceMicEnabled ? 'Microphone: On' : 'Microphone: Off';
 
   if (btnForceMic) {
     btnForceMic.textContent = label;

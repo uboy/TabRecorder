@@ -172,6 +172,12 @@ async function onStartClick() {
   diag('capture', `tab stream: video=${videoTracks.length} audio=${audioTracks.length}`);
 
   if (audioTracks.length === 0) {
+    const proceed = confirm("ВНИМАНИЕ: Звук вкладки не был захвачен!\n\nВ Firefox при выборе вкладки для записи нужно обязательно поставить галочку 'Share audio' (Делиться аудио) в самом окне выбора.\n\nПродолжить запись без звука вкладки?");
+    if (!proceed) {
+      releaseStreams();
+      resetToIdle();
+      return;
+    }
     setStatus('Tab did not provide audio — recording video only.');
     diag('capture', 'WARNING: no tab audio track returned by getDisplayMedia');
   }
@@ -450,7 +456,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   btnStart.disabled = false;
   setStatus(
-    'Ready. Pick "Browser Tab" in the sharing dialog; enable its audio checkbox for sound.'
+    'Готово. Нажмите "Start", выберите вкладку и не забудьте галочку "Share audio" / "Делиться аудио".'
   );
   diag('env', `initialized; forceMic=${options.forceMic}; autostart=${options.autostart}`);
 

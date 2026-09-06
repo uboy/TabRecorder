@@ -20,9 +20,15 @@
     <div id="rec-target" class="recorder-target">Tab Recorder (Firefox)</div>
 
     <div id="panel-idle">
+      <p style="font-size: 13px; color: #d97706; margin-bottom: 12px; line-height: 1.4;">
+        <strong>Важно для Firefox:</strong><br/>
+        1. Нажмите "Start recording".<br/>
+        2. В появившемся окне браузера выберите нужную вкладку.<br/>
+        3. <strong>ОБЯЗАТЕЛЬНО</strong> поставьте галочку "Share audio" (Делиться аудио) в самом низу этого диалога, иначе звук вкладки не запишется!
+      </p>
       <label class="mic-opt">
-        <input type="checkbox" id="rec-mic-check" />
-        <span>Include microphone</span>
+        <input type="checkbox" id="rec-mic-check" checked />
+        <span>Include microphone / Записывать микрофон</span>
       </label>
       <button id="btn-rec-start" class="btn btn-primary" disabled>Start recording</button>
     </div>
