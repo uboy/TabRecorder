@@ -45,7 +45,7 @@ let discardRequested = false;
 
 const options = {
   tabTitle: '',
-  forceMic: false,
+  forceMic: true,
   micDeviceId: null,
   autostart: false,
 };

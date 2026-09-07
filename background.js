@@ -44,7 +44,7 @@ let pendingBlobKey       = null;
 let pendingSuggestedName = '';
 
 // Current options reflected by popup controls.
-let currentForceMicOption = false;
+let currentForceMicOption = true;
 let currentShowPointerOption = false;
 let currentInteractionLockOption = false;
 
